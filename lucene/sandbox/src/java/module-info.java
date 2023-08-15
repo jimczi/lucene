@@ -19,6 +19,8 @@
 module org.apache.lucene.sandbox {
   requires org.apache.lucene.core;
   requires org.apache.lucene.queries;
+  requires jdk.incubator.vector;
+  requires org.apache.lucene.misc;
 
   exports org.apache.lucene.payloads;
   exports org.apache.lucene.sandbox.codecs.idversion;
@@ -28,5 +30,5 @@ module org.apache.lucene.sandbox {
   exports org.apache.lucene.sandbox.index;
 
   provides org.apache.lucene.codecs.PostingsFormat with
-      org.apache.lucene.sandbox.codecs.idversion.IDVersionPostingsFormat;
+          org.apache.lucene.sandbox.codecs.idversion.IDVersionPostingsFormat;
 }
