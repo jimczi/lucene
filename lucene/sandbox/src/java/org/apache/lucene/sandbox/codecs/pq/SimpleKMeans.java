@@ -32,12 +32,14 @@ public class SimpleKMeans {
     private int startOffset;
     private int endOffset;
     private final int numCentroids;
+    private final boolean spherical;
     private final Random random;
 
     public SimpleKMeans(RandomAccessVectorValues<float[]> reader,
                         int startOffset,
                         int endOffset,
                         int numCentroids,
+                        boolean spherical,
                         long seed) {
         this.reader = reader;
         this.numDocs = reader.size();
@@ -45,6 +47,7 @@ public class SimpleKMeans {
         this.dims = reader.dimension();
         this.startOffset = startOffset;
         this.endOffset = endOffset;
+        this.spherical = spherical;
         this.random = new Random(seed);
     }
 
@@ -60,20 +63,19 @@ public class SimpleKMeans {
             }
         }
 
-        return runKMeans(initialCentroids);
+        return runKMeans(spherical ? l2norm(initialCentroids) : initialCentroids);
     }
 
-    private float[][] runKMeans(float[][] initialCentroids) throws IOException {
+    private float[][] runKMeans(float[][] centroids) throws IOException {
         int[] documentCentroids = new int[numDocs];
 
         for (int iter = 0; iter < NUM_ITERS; iter++) {
-            initialCentroids = runKMeansStep(iter, initialCentroids, documentCentroids);
+            centroids = runKMeansStep(centroids, documentCentroids);
         }
-        return initialCentroids;
+        return centroids;
     }
 
-    private float[][] runKMeansStep(int iter,
-                                    float[][] centroids,
+    private float[][] runKMeansStep(float[][] centroids,
                                     int[] documentCentroids) throws IOException {
         float[][] newCentroids = new float[centroids.length][centroids[0].length];
         int[] newCentroidSize = new int[centroids.length];
@@ -83,15 +85,14 @@ public class SimpleKMeans {
             float[] subVector = ArrayUtil.copyOfSubArray(value, startOffset, endOffset);
 
             int bestCentroid = -1;
-            double bestDist = Double.MAX_VALUE;
+            float bestDist = Float.NEGATIVE_INFINITY;
             for (int c = 0; c < centroids.length; c++) {
-                double dist = VectorUtil.squareDistance(centroids[c], subVector);
-                if (dist < bestDist) {
+                float dist = 1f - VectorUtil.squareDistance(centroids[c], subVector);
+                if (dist > bestDist) {
                     bestCentroid = c;
                     bestDist = dist;
                 }
             }
-
             newCentroidSize[bestCentroid]++;
             for (int v = 0; v < subVector.length; v++) {
                 newCentroids[bestCentroid][v] += subVector[v];
@@ -104,6 +105,20 @@ public class SimpleKMeans {
                 newCentroids[c][v] /= newCentroidSize[c];
             }
         }
-        return newCentroids;
+        return spherical ? l2norm(newCentroids) : newCentroids;
+    }
+
+    private float[][] l2norm(float[][] centroids) {
+        for (int i = 0; i < centroids.length; i++) {
+            float norm = 0f;
+            for (int j = 0; j < centroids[0].length; ++j) {
+                norm += centroids[i][j] * centroids[i][j];
+            }
+            norm = (float) Math.sqrt(norm);
+            for (int j = 0; j < centroids[0].length; ++j) {
+                centroids[i][j] /= norm;
+            }
+        }
+        return centroids;
     }
 }

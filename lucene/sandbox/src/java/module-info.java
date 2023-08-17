@@ -20,7 +20,6 @@ module org.apache.lucene.sandbox {
   requires org.apache.lucene.core;
   requires org.apache.lucene.queries;
   requires jdk.incubator.vector;
-  requires org.apache.lucene.misc;
 
   exports org.apache.lucene.payloads;
   exports org.apache.lucene.sandbox.codecs.idversion;
