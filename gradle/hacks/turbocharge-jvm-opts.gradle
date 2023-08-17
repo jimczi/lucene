@@ -18,7 +18,9 @@
 // LUCENE-9861: tune JVM options for short-lived java subprocesses.
 allprojects {
     def vmOpts = [
-        '-XX:+UseParallelGC'
+        '-XX:+UseParallelGC',
+        '-XX:TieredStopAtLevel=1',
+        '-XX:ActiveProcessorCount=1'
     ]
 
     // Inject vm options into custom javadoc rendering. We can't refer
