@@ -3,7 +3,8 @@ package org.apache.lucene.sandbox.codecs.pq;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.util.VectorUtil;
 import org.apache.lucene.util.hnsw.NeighborQueue;
-import org.apache.lucene.sandbox.codecs.pq.ProductQuantizer.DistanceFunction;
+
+import static org.apache.lucene.sandbox.codecs.pq.ProductQuantizer.DistanceFunction;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -17,8 +18,8 @@ public class Benchmark {
   private static final Path dirPath =
           Paths.get("/Users/jimczi/playground/lucene/benchmarks/datasets/wikipedia-22-12-en-embeddings");
   private static final String vectorFile = "base.fvecs";
-  private static final String trainFile = "base.fvecs";
-  private static final String queryFile = "base.fvecs";
+  private static final String trainFile = "train.fvecs";
+  private static final String queryFile = "query.fvecs";
   private static final int numDocs = 1000000;
   private static final int numTraining = 10000;
   private static final int numQuery = 100;
@@ -26,7 +27,7 @@ public class Benchmark {
   private static DistanceFunction distanceFunction = DistanceFunction.INNER_PRODUCT;
   private static int numSubQuantizer = numDims / 16;
   private static int topK = 10;
-  private static int rerankFactor = 100;
+  private static int rerankFactor = 10;
   private static boolean sphericalKMeans = false;
   private static long seed = 42L;
 
@@ -87,7 +88,7 @@ public class Benchmark {
          IndexInputFloatVectorValues queryInput =
               new IndexInputFloatVectorValues(directory, queryFile, numDims, numQuery)) {
       long start = System.nanoTime();
-      pq = ProductQuantizer.create(trainingInput, numSubQuantizer, sphericalKMeans, seed);
+      pq = ProductQuantizer.create(trainingInput, numSubQuantizer, distanceFunction, sphericalKMeans, seed);
       long elapsed = System.nanoTime() - start;
       System.out.format("Create product quantizer using %d training vectors and %d sub-quantizers in %d milliseconds%n",
               numTraining, numSubQuantizer, TimeUnit.NANOSECONDS.toMillis(elapsed));

@@ -47,6 +47,7 @@ public class ProductQuantizer {
 
   public static ProductQuantizer create(RandomAccessVectorValues<float[]> reader,
                                         int numSubQuantizer,
+                                        DistanceFunction distanceFunction,
                                         boolean sphericalKMeans,
                                         long seed) throws IOException {
     int subVectorLength = reader.dimension() / numSubQuantizer;
@@ -55,7 +56,8 @@ public class ProductQuantizer {
       // take the appropriate sub-vector
       int startOffset = i * subVectorLength;
       int endOffset = Math.min(startOffset + subVectorLength, reader.dimension());
-      SimpleKMeans kmeans = new SimpleKMeans(reader, startOffset, endOffset, NUM_CENTROIDS, sphericalKMeans, seed);
+      SimpleKMeans kmeans =
+              new SimpleKMeans(reader, startOffset, endOffset, NUM_CENTROIDS, distanceFunction, sphericalKMeans, seed);
       centroids[i] = kmeans.computeCentroids();
     }
     return new ProductQuantizer(reader.dimension(), numSubQuantizer, centroids);

@@ -24,6 +24,8 @@ import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.VectorUtil;
 import org.apache.lucene.util.hnsw.RandomAccessVectorValues;
 
+import static org.apache.lucene.sandbox.codecs.pq.ProductQuantizer.DistanceFunction;
+
 public class SimpleKMeans {
     private final static int NUM_ITERS = 10;
     private final RandomAccessVectorValues<float[]> reader;
@@ -32,6 +34,7 @@ public class SimpleKMeans {
     private int startOffset;
     private int endOffset;
     private final int numCentroids;
+    private final DistanceFunction distanceFunction;
     private final boolean spherical;
     private final Random random;
 
@@ -39,6 +42,7 @@ public class SimpleKMeans {
                         int startOffset,
                         int endOffset,
                         int numCentroids,
+                        DistanceFunction distanceFunction,
                         boolean spherical,
                         long seed) {
         this.reader = reader;
@@ -47,6 +51,7 @@ public class SimpleKMeans {
         this.dims = reader.dimension();
         this.startOffset = startOffset;
         this.endOffset = endOffset;
+        this.distanceFunction = distanceFunction;
         this.spherical = spherical;
         this.random = new Random(seed);
     }
@@ -87,7 +92,12 @@ public class SimpleKMeans {
             int bestCentroid = -1;
             float bestDist = Float.NEGATIVE_INFINITY;
             for (int c = 0; c < centroids.length; c++) {
-                float dist = 1f - VectorUtil.squareDistance(centroids[c], subVector);
+                float dist;
+                switch (distanceFunction) {
+                    case L2 -> dist = 1f - VectorUtil.squareDistance(centroids[c], subVector);
+                    case INNER_PRODUCT -> dist = VectorUtil.dotProduct(centroids[c], subVector);
+                    default -> throw new IllegalArgumentException("not implemented");
+                }
                 if (dist > bestDist) {
                     bestCentroid = c;
                     bestDist = dist;
