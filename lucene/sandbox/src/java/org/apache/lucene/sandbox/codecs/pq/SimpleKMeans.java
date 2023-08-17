@@ -24,35 +24,25 @@ import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.VectorUtil;
 import org.apache.lucene.util.hnsw.RandomAccessVectorValues;
 
-import static org.apache.lucene.sandbox.codecs.pq.ProductQuantizer.DistanceFunction;
-
 public class SimpleKMeans {
     private final static int NUM_ITERS = 10;
     private final RandomAccessVectorValues<float[]> reader;
     private final int numDocs;
-    private int dims;
     private int startOffset;
     private int endOffset;
     private final int numCentroids;
-    private final DistanceFunction distanceFunction;
-    private final boolean spherical;
     private final Random random;
 
     public SimpleKMeans(RandomAccessVectorValues<float[]> reader,
                         int startOffset,
                         int endOffset,
                         int numCentroids,
-                        DistanceFunction distanceFunction,
-                        boolean spherical,
                         long seed) {
         this.reader = reader;
         this.numDocs = reader.size();
         this.numCentroids = numCentroids;
-        this.dims = reader.dimension();
         this.startOffset = startOffset;
         this.endOffset = endOffset;
-        this.distanceFunction = distanceFunction;
-        this.spherical = spherical;
         this.random = new Random(seed);
     }
 
@@ -68,7 +58,7 @@ public class SimpleKMeans {
             }
         }
 
-        return runKMeans(spherical ? l2norm(initialCentroids) : initialCentroids);
+        return runKMeans(initialCentroids);
     }
 
     private float[][] runKMeans(float[][] centroids) throws IOException {
@@ -92,12 +82,7 @@ public class SimpleKMeans {
             int bestCentroid = -1;
             float bestDist = Float.NEGATIVE_INFINITY;
             for (int c = 0; c < centroids.length; c++) {
-                float dist;
-                switch (distanceFunction) {
-                    case L2 -> dist = 1f - VectorUtil.squareDistance(centroids[c], subVector);
-                    case INNER_PRODUCT -> dist = VectorUtil.dotProduct(centroids[c], subVector);
-                    default -> throw new IllegalArgumentException("not implemented");
-                }
+                float dist = 1f - VectorUtil.squareDistance(centroids[c], subVector);
                 if (dist > bestDist) {
                     bestCentroid = c;
                     bestDist = dist;
@@ -115,20 +100,6 @@ public class SimpleKMeans {
                 newCentroids[c][v] /= newCentroidSize[c];
             }
         }
-        return spherical ? l2norm(newCentroids) : newCentroids;
-    }
-
-    private float[][] l2norm(float[][] centroids) {
-        for (int i = 0; i < centroids.length; i++) {
-            float norm = 0f;
-            for (int j = 0; j < centroids[0].length; ++j) {
-                norm += centroids[i][j] * centroids[i][j];
-            }
-            norm = (float) Math.sqrt(norm);
-            for (int j = 0; j < centroids[0].length; ++j) {
-                centroids[i][j] /= norm;
-            }
-        }
-        return centroids;
+        return newCentroids;
     }
 }

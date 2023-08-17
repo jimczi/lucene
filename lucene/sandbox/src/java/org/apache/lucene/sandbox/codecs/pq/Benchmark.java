@@ -22,31 +22,18 @@ public class Benchmark {
   private static final String queryFile = "query.fvecs";
   private static final int numDocs = 1000000;
   private static final int numTraining = 10000;
-  private static final int numQuery = 100;
+  private static final int numQuery = 1000;
   private static final int numDims = 768;
   private static DistanceFunction distanceFunction = DistanceFunction.INNER_PRODUCT;
-  private static int numSubQuantizer = numDims / 16;
-  private static int topK = 10;
-  private static int rerankFactor = 10;
-  private static boolean sphericalKMeans = false;
+  private static int[] numSubQuantizers = new int[] {numDims / 32, numDims / 16, numDims / 8, numDims / 4};
+  private static final int[] topKs = new int[] {10, 100};
+  private static final int[] rerankFactors = new int[] {1, 10, 100};
   private static long seed = 42L;
 
   public static void main(String[] args) throws Exception {
     for (int i = 0; i < args.length; i++) {
       String arg = args[i];
       switch (arg) {
-        case "-numSub":
-          numSubQuantizer = Integer.parseInt(args[++i]);
-          break;
-        case "-topk":
-          topK = Integer.parseInt(args[++i]);
-          break;
-        case "-rerankFactor":
-          rerankFactor = Integer.parseInt(args[++i]);
-          break;
-        case "-spherical":
-          sphericalKMeans = true;
-          break;
         case "-seed":
           seed = Long.parseLong(args[++i]);
           break;
@@ -74,66 +61,101 @@ public class Benchmark {
 
   private static void usage() {
     String error =
-            "Usage: Benchmark [-numSub N] [-spherical] [-metric N] [-topk N] [-rerankFactor N] [-seed N]";
+            "Usage: Benchmark [-metric N] [-seed N]";
     System.err.println(error);
   }
 
   private void runBenchmark() throws Exception {
-    final ProductQuantizer pq;
-    try (MMapDirectory directory = new MMapDirectory(dirPath);
-         IndexInputFloatVectorValues trainingInput =
-              new IndexInputFloatVectorValues(directory, trainFile, numDims, numTraining);
-         IndexInputFloatVectorValues vectorInput =
-              new IndexInputFloatVectorValues(directory, vectorFile, numDims, numDocs);
-         IndexInputFloatVectorValues queryInput =
-              new IndexInputFloatVectorValues(directory, queryFile, numDims, numQuery)) {
-      long start = System.nanoTime();
-      pq = ProductQuantizer.create(trainingInput, numSubQuantizer, distanceFunction, sphericalKMeans, seed);
-      long elapsed = System.nanoTime() - start;
-      System.out.format("Create product quantizer using %d training vectors and %d sub-quantizers in %d milliseconds%n",
-              numTraining, numSubQuantizer, TimeUnit.NANOSECONDS.toMillis(elapsed));
+    for (int numSubQuantizer : numSubQuantizers) {
+      final ProductQuantizer pq;
+      try (MMapDirectory directory = new MMapDirectory(dirPath);
+           IndexInputFloatVectorValues trainingInput =
+                   new IndexInputFloatVectorValues(directory, trainFile, numDims, numTraining);
+           IndexInputFloatVectorValues vectorInput =
+                   new IndexInputFloatVectorValues(directory, vectorFile, numDims, numDocs);
+           IndexInputFloatVectorValues queryInput =
+                   new IndexInputFloatVectorValues(directory, queryFile, numDims, numQuery)) {
+        long start = System.nanoTime();
+        pq = ProductQuantizer.create(trainingInput, numSubQuantizer, distanceFunction, seed);
+        long elapsed = System.nanoTime() - start;
+        System.out.format("Create product quantizer using %d training vectors and %d sub-quantizers in %d milliseconds%n",
+                numTraining, numSubQuantizer, TimeUnit.NANOSECONDS.toMillis(elapsed));
 
-      final byte[][] codes = new byte[numDocs][];
-      long startEncode = System.nanoTime();
-      for (int i = 0; i < vectorInput.size(); i++) {
-        codes[i] = pq.encode(vectorInput.vectorValue(i));
+        final byte[][] codes = new byte[numDocs][];
+        long startEncode = System.nanoTime();
+        for (int i = 0; i < vectorInput.size(); i++) {
+          codes[i] = pq.encode(vectorInput.vectorValue(i));
+        }
+        long elapsedEncode = System.nanoTime() - startEncode;
+        System.out.format(Locale.ROOT, "Encode %d vectors with %d sub-quantizers in %d milliseconds%n",
+                numDocs, numSubQuantizer, TimeUnit.NANOSECONDS.toMillis(elapsedEncode));
+
+        float[] recalls = new float[topKs.length * rerankFactors.length];
+        long[] elapsedCodes = new long[topKs.length * rerankFactors.length];
+        long[] elapsedVectors = new long[topKs.length];
+        int row = 0;
+        for (int topK : topKs) {
+          int[][] groundTruths = new int[numQuery][];
+          long elapsedVectorCmp = 0;
+          for (int i = 0; i < numQuery; i++) {
+            float[] candidate = queryInput.vectorValue(i);
+            long startVectorCmp = System.nanoTime();
+            groundTruths[i] = getNN(vectorInput, candidate, topK);
+            elapsedVectorCmp += System.nanoTime() - startVectorCmp;
+          }
+          for (int rerankFactor : rerankFactors) {
+            int totalMatches = 0;
+            int totalResults = 0;
+            long elapsedCodeCmp = 0;
+            for (int i = 0; i < numQuery; i++) {
+              float[] candidate = queryInput.vectorValue(i);
+              long startCodeCmp = System.nanoTime();
+              int[] results = getTopDocs(pq, codes, candidate, topK * rerankFactor);
+              elapsedCodeCmp += System.nanoTime() - startCodeCmp;
+              totalMatches += compareNN(groundTruths[i], results);
+              totalResults += topK;
+            }
+            float recall = totalMatches / (float) totalResults;
+            elapsedCodes[row] = elapsedCodeCmp;
+            recalls[row++] = recall;
+          }
+        }
+        System.out.println("Recall:");
+        System.out.print("[PQ");
+        for (int topK : topKs) {
+          for (int rerankFactor : rerankFactors) {
+            System.out.print(", " + topK + "|" + topK*rerankFactor);
+          }
+        }
+        System.out.println("]");
+        System.out.print("['" + numSubQuantizer + "'");
+        for (float recall : recalls) {
+          System.out.print(", " + recall);
+        }
+        System.out.println("]");
+
+        System.out.println("Performance:");
+        System.out.print("[PQ");
+        for (int topK : topKs) {
+          for (int rerankFactor : rerankFactors) {
+            System.out.print(", " + topK + "|" + topK*rerankFactor);
+          }
+        }
+        System.out.print("['" + numSubQuantizer + "'");
+        for (long elapsedCode : elapsedCodes) {
+          System.out.print(", " + TimeUnit.NANOSECONDS.toMillis(elapsedCode));
+        }
+        System.out.println("]");
       }
-      long elapsedEncode = System.nanoTime() - startEncode;
-      System.out.format(Locale.ROOT, "Encode %d vectors with %d sub-quantizers in %d milliseconds%n",
-              numDocs, numSubQuantizer, TimeUnit.NANOSECONDS.toMillis(elapsedEncode));
-
-      int totalMatches = 0;
-      int totalResults = 0;
-      long totalCodeCompare = 0;
-      long totalVectorCompare = 0;
-      for (int i = 0; i < numQuery; i++) {
-        float[] candidate = queryInput.vectorValue(i);
-        long startCode = System.nanoTime();
-        int[] results = getTopDocs(pq, distanceFunction, codes, candidate, topK * rerankFactor);
-        totalCodeCompare += System.nanoTime() - startCode;
-
-        long startVector = System.nanoTime();
-        int[] nn = getNN(vectorInput, candidate, topK);
-        totalVectorCompare += System.nanoTime() - startVector;
-        totalMatches += compareNN(nn, results);
-        totalResults += nn.length;
-      }
-      float recall = totalMatches / (float) totalResults;
-      System.out.format(Locale.ROOT,
-              "Query %d codes in %d milliseconds with a recall@%d of %f with a re-rank factor of %d%n",
-              numQuery, TimeUnit.NANOSECONDS.toMillis(totalCodeCompare), topK, recall, rerankFactor);
-      System.out.format(Locale.ROOT, "Query %d vectors in %d milliseconds with a recall@%d of %f%n",
-              numQuery, TimeUnit.NANOSECONDS.toMillis(totalVectorCompare), topK, 1.0f);
     }
   }
 
   private int[] getTopDocs(ProductQuantizer quantizer,
-                           DistanceFunction distanceFunction,
                            byte[][] codes,
                            float[] query,
                            int topK) {
     NeighborQueue pq = new NeighborQueue(topK, false);
-    ProductQuantizer.DistanceRunner runner = quantizer.createDistanceRunner(query, distanceFunction);
+    ProductQuantizer.DistanceRunner runner = quantizer.createDistanceRunner(query);
     for (int i = 0; i < codes.length; i++) {
       float res = runner.distance(codes[i]);
       pq.insertWithOverflow(i, res);

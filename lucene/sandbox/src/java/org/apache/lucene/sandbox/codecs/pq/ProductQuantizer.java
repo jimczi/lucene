@@ -35,20 +35,22 @@ public class ProductQuantizer {
   private final int numSubQuantizer;
   private final int subVectorLength;
   private final float[][][] centroids;
+  private final DistanceFunction distanceFunction;
 
   private ProductQuantizer(int numDims,
                            int numSubQuantizer,
-                           float[][][] centroids) {
+                           float[][][] centroids,
+                           DistanceFunction distanceFunction) {
     this.numDims = numDims;
     this.numSubQuantizer = numSubQuantizer;
     this.subVectorLength = numDims / numSubQuantizer;
     this.centroids = centroids;
+    this.distanceFunction = distanceFunction;
   }
 
   public static ProductQuantizer create(RandomAccessVectorValues<float[]> reader,
                                         int numSubQuantizer,
                                         DistanceFunction distanceFunction,
-                                        boolean sphericalKMeans,
                                         long seed) throws IOException {
     int subVectorLength = reader.dimension() / numSubQuantizer;
     float[][][] centroids = new float[numSubQuantizer][][];
@@ -57,10 +59,10 @@ public class ProductQuantizer {
       int startOffset = i * subVectorLength;
       int endOffset = Math.min(startOffset + subVectorLength, reader.dimension());
       SimpleKMeans kmeans =
-              new SimpleKMeans(reader, startOffset, endOffset, NUM_CENTROIDS, distanceFunction, sphericalKMeans, seed);
+              new SimpleKMeans(reader, startOffset, endOffset, NUM_CENTROIDS, seed);
       centroids[i] = kmeans.computeCentroids();
     }
-    return new ProductQuantizer(reader.dimension(), numSubQuantizer, centroids);
+    return new ProductQuantizer(reader.dimension(), numSubQuantizer, centroids, distanceFunction);
   }
 
   public byte[] encode(float[] vector) {
@@ -76,7 +78,7 @@ public class ProductQuantizer {
     return pqCode;
   }
 
-  public DistanceRunner createDistanceRunner(float[] qVector, DistanceFunction distanceFunction) {
+  public DistanceRunner createDistanceRunner(float[] qVector) {
     float[] distances = new float[numSubQuantizer*NUM_CENTROIDS];
     for (int i = 0; i < numSubQuantizer; i++) {
       // take the appropriate sub-vector
@@ -96,8 +98,8 @@ public class ProductQuantizer {
     return new DistanceRunner(distances);
   }
 
-  public QuantizedDistanceRunner createQuantizedDistanceRunner(float[] qVector, DistanceFunction distanceFunction) {
-    DistanceRunner floatRunner = createDistanceRunner(qVector, distanceFunction);
+  public QuantizedDistanceRunner createQuantizedDistanceRunner(float[] qVector) {
+    DistanceRunner floatRunner = createDistanceRunner(qVector);
     byte[] distanceBytes = new byte[numSubQuantizer * NUM_CENTROIDS];
     for (int i = 0; i < numSubQuantizer; i++) {
       float minDist = Float.POSITIVE_INFINITY;
@@ -159,14 +161,14 @@ public class ProductQuantizer {
     return quantizeByte( sample - min, max - min );
   }
 
-  private byte computeNearestProductIndex(float[] subVector, int subQuantizerIndex) {
+  private byte computeNearestProductIndex(float[] subVector, int subIndex) {
     int centroidIndex = -1;
     float bestDistance = Float.NEGATIVE_INFINITY;
-    for (int i = 0; i < NUM_CENTROIDS; i++) {
-      float distance = 1f - VectorUtil.squareDistance(centroids[subQuantizerIndex][i], subVector);
-      if (distance > bestDistance) {
-        bestDistance = distance;
-        centroidIndex = i;
+    for (int c = 0; c < NUM_CENTROIDS; c++) {
+      float dist = 1f - VectorUtil.squareDistance(centroids[subIndex][c], subVector);
+      if (dist > bestDistance) {
+        bestDistance = dist;
+        centroidIndex = c;
       }
     }
     return (byte) centroidIndex;
