@@ -29,5 +29,5 @@ module org.apache.lucene.sandbox {
   exports org.apache.lucene.sandbox.index;
 
   provides org.apache.lucene.codecs.PostingsFormat with
-          org.apache.lucene.sandbox.codecs.idversion.IDVersionPostingsFormat;
+      org.apache.lucene.sandbox.codecs.idversion.IDVersionPostingsFormat;
 }
