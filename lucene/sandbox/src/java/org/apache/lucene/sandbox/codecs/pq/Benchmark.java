@@ -141,6 +141,8 @@ public class Benchmark {
             System.out.print(", " + topK + "|" + topK*rerankFactor);
           }
         }
+        System.out.println("]");
+
         System.out.print("['" + numSubQuantizer + "'");
         for (long elapsedCode : elapsedCodes) {
           System.out.print(", " + TimeUnit.NANOSECONDS.toMillis(elapsedCode));

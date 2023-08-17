@@ -98,29 +98,6 @@ public class ProductQuantizer {
     return new DistanceRunner(distances);
   }
 
-  public QuantizedDistanceRunner createQuantizedDistanceRunner(float[] qVector) {
-    DistanceRunner floatRunner = createDistanceRunner(qVector);
-    byte[] distanceBytes = new byte[numSubQuantizer * NUM_CENTROIDS];
-    for (int i = 0; i < numSubQuantizer; i++) {
-      float minDist = Float.POSITIVE_INFINITY;
-      float maxDist = Float.NEGATIVE_INFINITY;
-      for (int j = 0; j < NUM_CENTROIDS; j++) {
-        int index = i * NUM_CENTROIDS + j;
-        if (floatRunner.distanceTable[index] < minDist) {
-          minDist = floatRunner.distanceTable[index];
-        }
-        if (floatRunner.distanceTable[index] > maxDist) {
-          maxDist = floatRunner.distanceTable[index];
-        }
-      }
-      for (int j = 0; j < NUM_CENTROIDS; j++) {
-        int index = i * NUM_CENTROIDS + j;
-        distanceBytes[index] = quantize(floatRunner.distanceTable[index], minDist, maxDist);
-      }
-    }
-    return new QuantizedDistanceRunner(distanceBytes);
-  }
-
   public static class DistanceRunner {
     public final float[] distanceTable;
 
@@ -129,36 +106,41 @@ public class ProductQuantizer {
     }
 
     public float distance(byte[] pqCode) {
+      if (pqCode.length >= 8) {
+        return distanceUnrolled(pqCode);
+      }
+      return distanceSimple(pqCode);
+    }
+
+    private float distanceSimple(byte[] pqCode) {
       float score = 0f;
       for (int i = 0; i < pqCode.length; i++) {
         score += distanceTable[i * NUM_CENTROIDS + ((int) pqCode[i] & 0xFF)];
       }
       return score;
     }
-  }
 
-  public static class QuantizedDistanceRunner {
-    private final byte[] distanceTable;
-
-    private QuantizedDistanceRunner(byte[] distanceTable) {
-      this.distanceTable = distanceTable;
-    }
-
-    public short distance(byte[] pqCode) {
-      short score = 0;
-      for (int i = 0; i < pqCode.length; i++) {
-        score += distanceTable[i * NUM_CENTROIDS + ((int) pqCode[i] & 0xFF)];
+    private float distanceUnrolled(byte[] pqCode) {
+      float res = 0f;
+      int i = 0;
+      for (i = 0; i < pqCode.length % 8; i++) {
+        res += distanceTable[i * NUM_CENTROIDS + ((int) pqCode[i] & 0xFF)];
       }
-      return score;
+      if (pqCode.length < 8) {
+        return res;
+      }
+      for (; i + 7 < pqCode.length; i += 8) {
+        res += distanceTable[i * NUM_CENTROIDS + ((int) pqCode[i] & 0xFF)];
+        res += distanceTable[(i+1) * NUM_CENTROIDS + ((int) pqCode[(i+1)] & 0xFF)];
+        res += distanceTable[(i+2) * NUM_CENTROIDS + ((int) pqCode[(i+2)] & 0xFF)];
+        res += distanceTable[(i+3) * NUM_CENTROIDS + ((int) pqCode[(i+3)] & 0xFF)];
+        res += distanceTable[(i+4) * NUM_CENTROIDS + ((int) pqCode[(i+4)] & 0xFF)];
+        res += distanceTable[(i+5) * NUM_CENTROIDS + ((int) pqCode[(i+5)] & 0xFF)];
+        res += distanceTable[(i+6) * NUM_CENTROIDS + ((int) pqCode[(i+6)] & 0xFF)];
+        res += distanceTable[(i+7) * NUM_CENTROIDS + ((int) pqCode[(i+7)] & 0xFF)];
+      }
+      return res;
     }
-  }
-
-  private byte quantizeByte(float sample, float maxValue) {
-    return (byte) ((sample / maxValue) * 255.0);
-  }
-
-  private byte quantize(float sample, float min, float max){
-    return quantizeByte( sample - min, max - min );
   }
 
   private byte computeNearestProductIndex(float[] subVector, int subIndex) {
