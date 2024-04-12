@@ -33,7 +33,7 @@ public final class InitializedHnswGraphBuilder extends HnswGraphBuilder {
   /**
    * Create a new HnswGraphBuilder that is initialized with the provided HnswGraph.
    *
-   * @param scorerSupplier the scorer to use for vectors
+   * @param scorer the scorer to use for vectors
    * @param M the number of connections to keep per node
    * @param beamWidth the number of nodes to explore in the search
    * @param seed the seed for the random number generator
@@ -46,7 +46,7 @@ public final class InitializedHnswGraphBuilder extends HnswGraphBuilder {
    * @throws IOException when reading the graph fails
    */
   public static InitializedHnswGraphBuilder fromGraph(
-      RandomVectorScorerSupplier scorerSupplier,
+      RandomVectorScorer scorer,
       int M,
       int beamWidth,
       long seed,
@@ -56,7 +56,7 @@ public final class InitializedHnswGraphBuilder extends HnswGraphBuilder {
       int totalNumberOfVectors)
       throws IOException {
     return new InitializedHnswGraphBuilder(
-        scorerSupplier,
+        scorer,
         M,
         beamWidth,
         seed,
@@ -92,14 +92,14 @@ public final class InitializedHnswGraphBuilder extends HnswGraphBuilder {
   private final BitSet initializedNodes;
 
   public InitializedHnswGraphBuilder(
-      RandomVectorScorerSupplier scorerSupplier,
+      RandomVectorScorer scorer,
       int M,
       int beamWidth,
       long seed,
       OnHeapHnswGraph initializedGraph,
       BitSet initializedNodes)
       throws IOException {
-    super(scorerSupplier, M, beamWidth, seed, initializedGraph);
+    super(scorer, M, beamWidth, seed, initializedGraph);
     this.initializedNodes = initializedNodes;
   }
 

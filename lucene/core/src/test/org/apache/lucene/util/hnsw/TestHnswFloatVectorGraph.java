@@ -130,8 +130,8 @@ public class TestHnswFloatVectorGraph extends HnswGraphTestCase<float[]> {
     int nDoc = 1000;
     similarityFunction = VectorSimilarityFunction.EUCLIDEAN;
     RandomAccessVectorValues.Floats vectors = circularVectorValues(nDoc);
-    RandomVectorScorerSupplier scorerSupplier = buildScorerSupplier(vectors);
-    HnswGraphBuilder builder = HnswGraphBuilder.create(scorerSupplier, 16, 100, random().nextInt());
+    RandomVectorScorer scorer = buildScorer(vectors);
+    HnswGraphBuilder builder = HnswGraphBuilder.create(scorer, 16, 100, random().nextInt());
     OnHeapHnswGraph hnsw = builder.build(vectors.size());
 
     // Skip over half of the documents that are closest to the query vector

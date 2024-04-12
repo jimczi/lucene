@@ -25,7 +25,6 @@ import java.util.HashMap;
 import java.util.Map;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.hnsw.FlatVectorsReader;
-import org.apache.lucene.codecs.hnsw.FlatVectorsScorer;
 import org.apache.lucene.codecs.lucene95.OrdToDocDISIReaderConfiguration;
 import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.CorruptIndexException;
@@ -44,6 +43,7 @@ import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
+import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
 import org.apache.lucene.util.quantization.QuantizedByteVectorValues;
 import org.apache.lucene.util.quantization.QuantizedVectorsReader;
 import org.apache.lucene.util.quantization.ScalarQuantizer;
@@ -64,9 +64,11 @@ public final class Lucene99ScalarQuantizedVectorsReader extends FlatVectorsReade
   private final FlatVectorsReader rawVectorsReader;
 
   public Lucene99ScalarQuantizedVectorsReader(
-      SegmentReadState state, FlatVectorsReader rawVectorsReader, FlatVectorsScorer scorer)
+      SegmentReadState state,
+      FlatVectorsReader rawVectorsReader,
+      RandomVectorScorerSupplier scorerSupplier)
       throws IOException {
-    super(scorer);
+    super(scorerSupplier);
     this.rawVectorsReader = rawVectorsReader;
     int versionMeta = -1;
     String metaFileName =
@@ -231,7 +233,7 @@ public final class Lucene99ScalarQuantizedVectorsReader extends FlatVectorsReade
             fieldEntry.vectorDataOffset,
             fieldEntry.vectorDataLength,
             quantizedVectorData);
-    return vectorScorer.getRandomVectorScorer(fieldEntry.similarityFunction, vectorValues, target);
+    return scorerSupplier.create(vectorValues, fieldEntry.similarityFunction, target);
   }
 
   @Override

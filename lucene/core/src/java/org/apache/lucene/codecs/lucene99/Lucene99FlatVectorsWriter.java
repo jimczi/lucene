@@ -30,7 +30,6 @@ import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.KnnFieldVectorsWriter;
 import org.apache.lucene.codecs.KnnVectorsWriter;
 import org.apache.lucene.codecs.hnsw.FlatFieldVectorsWriter;
-import org.apache.lucene.codecs.hnsw.FlatVectorsScorer;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.codecs.lucene95.OffHeapByteVectorValues;
 import org.apache.lucene.codecs.lucene95.OffHeapFloatVectorValues;
@@ -52,7 +51,7 @@ import org.apache.lucene.store.ReadAdvice;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
-import org.apache.lucene.util.hnsw.CloseableRandomVectorScorerSupplier;
+import org.apache.lucene.util.hnsw.CloseableRandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
 
@@ -72,7 +71,7 @@ public final class Lucene99FlatVectorsWriter extends FlatVectorsWriter {
   private final List<FieldWriter<?>> fields = new ArrayList<>();
   private boolean finished;
 
-  public Lucene99FlatVectorsWriter(SegmentWriteState state, FlatVectorsScorer scorer)
+  public Lucene99FlatVectorsWriter(SegmentWriteState state, RandomVectorScorerSupplier scorer)
       throws IOException {
     super(scorer);
     segmentWriteState = state;
@@ -266,7 +265,7 @@ public final class Lucene99FlatVectorsWriter extends FlatVectorsWriter {
   }
 
   @Override
-  public CloseableRandomVectorScorerSupplier mergeOneFieldToIndex(
+  public CloseableRandomVectorScorer mergeOneFieldToIndex(
       FieldInfo fieldInfo, MergeState mergeState) throws IOException {
     long vectorDataOffset = vectorData.alignFilePointer(Float.BYTES);
     IndexOutput tempVectorData =
@@ -306,30 +305,30 @@ public final class Lucene99FlatVectorsWriter extends FlatVectorsWriter {
           docsWithField);
       success = true;
       final IndexInput finalVectorDataInput = vectorDataInput;
-      final RandomVectorScorerSupplier randomVectorScorerSupplier =
+      final RandomVectorScorer randomVectorScorer =
           switch (fieldInfo.getVectorEncoding()) {
-            case BYTE -> vectorsScorer.getRandomVectorScorerSupplier(
-                fieldInfo.getVectorSimilarityFunction(),
+            case BYTE -> scorerSupplier.create(
                 new OffHeapByteVectorValues.DenseOffHeapVectorValues(
                     fieldInfo.getVectorDimension(),
                     docsWithField.cardinality(),
                     finalVectorDataInput,
-                    fieldInfo.getVectorDimension() * Byte.BYTES));
-            case FLOAT32 -> vectorsScorer.getRandomVectorScorerSupplier(
-                fieldInfo.getVectorSimilarityFunction(),
+                    fieldInfo.getVectorDimension() * Byte.BYTES),
+                fieldInfo.getVectorSimilarityFunction());
+            case FLOAT32 -> scorerSupplier.create(
                 new OffHeapFloatVectorValues.DenseOffHeapVectorValues(
                     fieldInfo.getVectorDimension(),
                     docsWithField.cardinality(),
                     finalVectorDataInput,
-                    fieldInfo.getVectorDimension() * Float.BYTES));
+                    fieldInfo.getVectorDimension() * Float.BYTES),
+                fieldInfo.getVectorSimilarityFunction());
           };
-      return new FlatCloseableRandomVectorScorerSupplier(
+      return new FlatCloseableRandomVectorScorer(
           () -> {
             IOUtils.close(finalVectorDataInput);
             segmentWriteState.directory.deleteFile(tempVectorData.getName());
           },
           docsWithField.cardinality(),
-          randomVectorScorerSupplier);
+          randomVectorScorer);
     } finally {
       if (success == false) {
         IOUtils.closeWhileHandlingException(vectorDataInput, tempVectorData);
@@ -479,28 +478,20 @@ public final class Lucene99FlatVectorsWriter extends FlatVectorsWriter {
     }
   }
 
-  static final class FlatCloseableRandomVectorScorerSupplier
-      implements CloseableRandomVectorScorerSupplier {
-
-    private final RandomVectorScorerSupplier supplier;
+  static final class FlatCloseableRandomVectorScorer implements CloseableRandomVectorScorer {
+    private final RandomVectorScorer scorer;
     private final Closeable onClose;
     private final int numVectors;
 
-    FlatCloseableRandomVectorScorerSupplier(
-        Closeable onClose, int numVectors, RandomVectorScorerSupplier supplier) {
+    FlatCloseableRandomVectorScorer(Closeable onClose, int numVectors, RandomVectorScorer scorer) {
       this.onClose = onClose;
-      this.supplier = supplier;
+      this.scorer = scorer;
       this.numVectors = numVectors;
     }
 
     @Override
-    public RandomVectorScorer scorer(int ord) throws IOException {
-      return supplier.scorer(ord);
-    }
-
-    @Override
-    public RandomVectorScorerSupplier copy() throws IOException {
-      return supplier.copy();
+    public RandomVectorScorer getScorer() {
+      return scorer;
     }
 
     @Override

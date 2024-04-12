@@ -38,7 +38,7 @@ public class TestLucene99HnswVectorsFormat extends BaseKnnVectorsFormatTestCase 
           }
         };
     String expectedString =
-        "Lucene99HnswVectorsFormat(name=Lucene99HnswVectorsFormat, maxConn=10, beamWidth=20, flatVectorFormat=Lucene99FlatVectorsFormat(vectorsScorer=DefaultFlatVectorScorer()))";
+        "Lucene99HnswVectorsFormat(name=Lucene99HnswVectorsFormat, maxConn=10, beamWidth=20, flatVectorFormat=Lucene99FlatVectorsFormat(scorerSupplier=DefaultRandomVectorScorerSupplier()))";
     assertEquals(expectedString, customCodec.knnVectorsFormat().toString());
   }
 

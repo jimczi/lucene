@@ -39,6 +39,7 @@ import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.IOUtils;
+import org.apache.lucene.util.hnsw.DefaultRandomVectorScorerSupplier;
 import org.apache.lucene.util.hnsw.HnswGraph;
 import org.apache.lucene.util.hnsw.HnswGraphSearcher;
 import org.apache.lucene.util.hnsw.OrdinalTranslatedKnnCollector;
@@ -232,7 +233,8 @@ public final class Lucene92HnswVectorsReader extends KnnVectorsReader {
 
     OffHeapFloatVectorValues vectorValues = OffHeapFloatVectorValues.load(fieldEntry, vectorData);
     RandomVectorScorer scorer =
-        RandomVectorScorer.createFloats(vectorValues, fieldEntry.similarityFunction, target);
+        DefaultRandomVectorScorerSupplier.createScorer(
+            vectorValues, fieldEntry.similarityFunction, target);
     HnswGraphSearcher.search(
         scorer,
         new OrdinalTranslatedKnnCollector(knnCollector, vectorValues::ordToDoc),

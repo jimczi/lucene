@@ -48,6 +48,7 @@ import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.lucene.util.hnsw.DefaultRandomVectorScorerSupplier;
 import org.apache.lucene.util.hnsw.HnswGraph;
 import org.apache.lucene.util.hnsw.HnswGraph.NodesIterator;
 import org.apache.lucene.util.hnsw.HnswGraphBuilder;
@@ -55,7 +56,7 @@ import org.apache.lucene.util.hnsw.IncrementalHnswGraphMerger;
 import org.apache.lucene.util.hnsw.NeighborArray;
 import org.apache.lucene.util.hnsw.OnHeapHnswGraph;
 import org.apache.lucene.util.hnsw.RandomAccessVectorValues;
-import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
+import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.packed.DirectMonotonicWriter;
 
 /**
@@ -436,11 +437,11 @@ public final class Lucene95HnswVectorsWriter extends KnnVectorsWriter {
       OnHeapHnswGraph graph = null;
       int[][] vectorIndexNodeOffsets = null;
       if (docsWithField.cardinality() != 0) {
-        final RandomVectorScorerSupplier scorerSupplier;
+        final RandomVectorScorer scorer;
         switch (fieldInfo.getVectorEncoding()) {
           case BYTE:
-            scorerSupplier =
-                RandomVectorScorerSupplier.createBytes(
+            scorer =
+                DefaultRandomVectorScorerSupplier.createScorer(
                     new OffHeapByteVectorValues.DenseOffHeapVectorValues(
                         fieldInfo.getVectorDimension(),
                         docsWithField.cardinality(),
@@ -449,8 +450,8 @@ public final class Lucene95HnswVectorsWriter extends KnnVectorsWriter {
                     fieldInfo.getVectorSimilarityFunction());
             break;
           case FLOAT32:
-            scorerSupplier =
-                RandomVectorScorerSupplier.createFloats(
+            scorer =
+                DefaultRandomVectorScorerSupplier.createScorer(
                     new OffHeapFloatVectorValues.DenseOffHeapVectorValues(
                         fieldInfo.getVectorDimension(),
                         docsWithField.cardinality(),
@@ -464,7 +465,7 @@ public final class Lucene95HnswVectorsWriter extends KnnVectorsWriter {
         }
         // build graph
         IncrementalHnswGraphMerger merger =
-            new IncrementalHnswGraphMerger(fieldInfo, scorerSupplier, M, beamWidth);
+            new IncrementalHnswGraphMerger(fieldInfo, scorer, M, beamWidth);
         for (int i = 0; i < mergeState.liveDocs.length; i++) {
           merger.addReader(
               mergeState.knnVectorsReaders[i], mergeState.docMaps[i], mergeState.liveDocs[i]);
@@ -695,17 +696,16 @@ public final class Lucene95HnswVectorsWriter extends KnnVectorsWriter {
       this.dim = fieldInfo.getVectorDimension();
       this.docsWithField = new DocsWithFieldSet();
       vectors = new ArrayList<>();
-      RandomVectorScorerSupplier scorerSupplier =
+      RandomVectorScorer scorer =
           switch (fieldInfo.getVectorEncoding()) {
-            case BYTE -> RandomVectorScorerSupplier.createBytes(
+            case BYTE -> DefaultRandomVectorScorerSupplier.createScorer(
                 RandomAccessVectorValues.fromBytes((List<byte[]>) vectors, dim),
                 fieldInfo.getVectorSimilarityFunction());
-            case FLOAT32 -> RandomVectorScorerSupplier.createFloats(
+            case FLOAT32 -> DefaultRandomVectorScorerSupplier.createScorer(
                 RandomAccessVectorValues.fromFloats((List<float[]>) vectors, dim),
                 fieldInfo.getVectorSimilarityFunction());
           };
-      hnswGraphBuilder =
-          HnswGraphBuilder.create(scorerSupplier, M, beamWidth, HnswGraphBuilder.randSeed);
+      hnswGraphBuilder = HnswGraphBuilder.create(scorer, M, beamWidth, HnswGraphBuilder.randSeed);
       hnswGraphBuilder.setInfoStream(infoStream);
     }
 

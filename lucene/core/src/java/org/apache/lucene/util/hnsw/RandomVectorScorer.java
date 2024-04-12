@@ -18,23 +18,28 @@
 package org.apache.lucene.util.hnsw;
 
 import java.io.IOException;
-import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.util.Bits;
 
 /** A {@link RandomVectorScorer} for scoring random nodes in batches against an abstract query. */
-public interface RandomVectorScorer {
+public abstract class RandomVectorScorer {
+  private final RandomAccessVectorValues values;
+
+  public RandomVectorScorer(RandomAccessVectorValues values) {
+    this.values = values;
+  }
+
   /**
-   * Returns the score between the query and the provided node.
-   *
-   * @param node a random node in the graph
-   * @return the computed score
+   * Make a copy of the supplier, which will copy the underlying vectorValues so the copy is safe to
+   * be used in other threads.
    */
-  float score(int node) throws IOException;
+  public abstract RandomVectorScorer copy() throws IOException;
 
   /**
    * @return the maximum possible ordinal for this scorer
    */
-  int maxOrd();
+  public int maxOrd() {
+    return values.size();
+  }
 
   /**
    * Translates vector ordinal to the correct document ID. By default, this is an identity function.
@@ -42,8 +47,8 @@ public interface RandomVectorScorer {
    * @param ord the vector ordinal
    * @return the document Id for that vector ordinal
    */
-  default int ordToDoc(int ord) {
-    return ord;
+  public int ordToDoc(int ord) {
+    return values.ordToDoc(ord);
   }
 
   /**
@@ -52,132 +57,24 @@ public interface RandomVectorScorer {
    * @param acceptDocs the accept docs
    * @return the accept docs
    */
-  default Bits getAcceptOrds(Bits acceptDocs) {
-    return acceptDocs;
+  public Bits getAcceptOrds(Bits acceptDocs) {
+    return values.getAcceptOrds(acceptDocs);
   }
 
   /**
-   * Creates a default scorer for float vectors.
+   * Switch the query to the provided {@code ord}. All scores will be computed against this ordinal
+   * after this call.
    *
-   * <p>WARNING: The {@link RandomAccessVectorValues} given can contain stateful buffers. Avoid
-   * using it after calling this function. If you plan to use it again outside the returned {@link
-   * RandomVectorScorer}, think about passing a copied version ({@link
-   * RandomAccessVectorValues#copy}).
-   *
-   * @param vectors the underlying storage for vectors
-   * @param similarityFunction the similarity function to score vectors
-   * @param query the actual query
+   * @param ord the ordinal of the query vector
+   * @return the modified random vector scorer
    */
-  static FloatVectorScorer createFloats(
-      final RandomAccessVectorValues.Floats vectors,
-      final VectorSimilarityFunction similarityFunction,
-      final float[] query) {
-    if (query.length != vectors.dimension()) {
-      throw new IllegalArgumentException(
-          "vector query dimension: "
-              + query.length
-              + " differs from field dimension: "
-              + vectors.dimension());
-    }
-    return new FloatVectorScorer(vectors, query, similarityFunction);
-  }
+  public abstract RandomVectorScorer setQueryOrd(int ord) throws IOException;
 
   /**
-   * Creates a default scorer for byte vectors.
+   * Returns the score between the query and the provided node.
    *
-   * <p>WARNING: The {@link RandomAccessVectorValues} given can contain stateful buffers. Avoid
-   * using it after calling this function. If you plan to use it again outside the returned {@link
-   * RandomVectorScorer}, think about passing a copied version ({@link
-   * RandomAccessVectorValues#copy}).
-   *
-   * @param vectors the underlying storage for vectors
-   * @param similarityFunction the similarity function to use to score vectors
-   * @param query the actual query
+   * @param node a random node in the graph
+   * @return the computed score
    */
-  static ByteVectorScorer createBytes(
-      final RandomAccessVectorValues.Bytes vectors,
-      final VectorSimilarityFunction similarityFunction,
-      final byte[] query) {
-    if (query.length != vectors.dimension()) {
-      throw new IllegalArgumentException(
-          "vector query dimension: "
-              + query.length
-              + " differs from field dimension: "
-              + vectors.dimension());
-    }
-    return new ByteVectorScorer(vectors, query, similarityFunction);
-  }
-
-  /** Creates a default scorer for random access vectors. */
-  abstract class AbstractRandomVectorScorer implements RandomVectorScorer {
-    private final RandomAccessVectorValues values;
-
-    /**
-     * Creates a new scorer for the given vector values.
-     *
-     * @param values the vector values
-     */
-    public AbstractRandomVectorScorer(RandomAccessVectorValues values) {
-      this.values = values;
-    }
-
-    @Override
-    public int maxOrd() {
-      return values.size();
-    }
-
-    @Override
-    public int ordToDoc(int ord) {
-      return values.ordToDoc(ord);
-    }
-
-    @Override
-    public Bits getAcceptOrds(Bits acceptDocs) {
-      return values.getAcceptOrds(acceptDocs);
-    }
-  }
-
-  /** A {@link RandomVectorScorer} for float vectors. */
-  class FloatVectorScorer extends AbstractRandomVectorScorer {
-    private final RandomAccessVectorValues.Floats values;
-    private final float[] query;
-    private final VectorSimilarityFunction similarityFunction;
-
-    public FloatVectorScorer(
-        RandomAccessVectorValues.Floats values,
-        float[] query,
-        VectorSimilarityFunction similarityFunction) {
-      super(values);
-      this.values = values;
-      this.query = query;
-      this.similarityFunction = similarityFunction;
-    }
-
-    @Override
-    public float score(int node) throws IOException {
-      return similarityFunction.compare(query, values.vectorValue(node));
-    }
-  }
-
-  /** A {@link RandomVectorScorer} for byte vectors. */
-  class ByteVectorScorer extends AbstractRandomVectorScorer {
-    private final RandomAccessVectorValues.Bytes values;
-    private final byte[] query;
-    private final VectorSimilarityFunction similarityFunction;
-
-    public ByteVectorScorer(
-        RandomAccessVectorValues.Bytes values,
-        byte[] query,
-        VectorSimilarityFunction similarityFunction) {
-      super(values);
-      this.values = values;
-      this.query = query;
-      this.similarityFunction = similarityFunction;
-    }
-
-    @Override
-    public float score(int node) throws IOException {
-      return similarityFunction.compare(query, values.vectorValue(node));
-    }
-  }
+  public abstract float score(int node) throws IOException;
 }

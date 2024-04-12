@@ -56,7 +56,7 @@ public class HnswGraphBuilder implements HnswBuilder {
   private final double ml;
 
   private final SplittableRandom random;
-  private final RandomVectorScorerSupplier scorerSupplier;
+  private final RandomVectorScorer scorer;
   private final HnswGraphSearcher graphSearcher;
   private final GraphBuilderKnnCollector entryCandidates; // for upper levels of graph search
   private final GraphBuilderKnnCollector
@@ -66,23 +66,22 @@ public class HnswGraphBuilder implements HnswBuilder {
 
   private InfoStream infoStream = InfoStream.getDefault();
 
-  public static HnswGraphBuilder create(
-      RandomVectorScorerSupplier scorerSupplier, int M, int beamWidth, long seed)
+  public static HnswGraphBuilder create(RandomVectorScorer scorer, int M, int beamWidth, long seed)
       throws IOException {
-    return new HnswGraphBuilder(scorerSupplier, M, beamWidth, seed, -1);
+    return new HnswGraphBuilder(scorer, M, beamWidth, seed, -1);
   }
 
   public static HnswGraphBuilder create(
-      RandomVectorScorerSupplier scorerSupplier, int M, int beamWidth, long seed, int graphSize)
+      RandomVectorScorer scorer, int M, int beamWidth, long seed, int graphSize)
       throws IOException {
-    return new HnswGraphBuilder(scorerSupplier, M, beamWidth, seed, graphSize);
+    return new HnswGraphBuilder(scorer, M, beamWidth, seed, graphSize);
   }
 
   /**
    * Reads all the vectors from vector values, builds a graph connecting them by their dense
    * ordinals, using the given hyperparameter settings, and returns the resulting graph.
    *
-   * @param scorerSupplier a supplier to create vector scorer from ordinals.
+   * @param scorer a supplier to create vector scorer from ordinals.
    * @param M – graph fanout parameter used to calculate the maximum number of connections a node
    *     can have – M on upper layers, and M * 2 on the lowest level.
    * @param beamWidth the size of the beam search to use when finding nearest neighbors.
@@ -91,20 +90,16 @@ public class HnswGraphBuilder implements HnswBuilder {
    * @param graphSize size of graph, if unknown, pass in -1
    */
   protected HnswGraphBuilder(
-      RandomVectorScorerSupplier scorerSupplier, int M, int beamWidth, long seed, int graphSize)
+      RandomVectorScorer scorer, int M, int beamWidth, long seed, int graphSize)
       throws IOException {
-    this(scorerSupplier, M, beamWidth, seed, new OnHeapHnswGraph(M, graphSize));
+    this(scorer, M, beamWidth, seed, new OnHeapHnswGraph(M, graphSize));
   }
 
   protected HnswGraphBuilder(
-      RandomVectorScorerSupplier scorerSupplier,
-      int M,
-      int beamWidth,
-      long seed,
-      OnHeapHnswGraph hnsw)
+      RandomVectorScorer scorer, int M, int beamWidth, long seed, OnHeapHnswGraph hnsw)
       throws IOException {
     this(
-        scorerSupplier,
+        scorer,
         M,
         beamWidth,
         seed,
@@ -116,7 +111,7 @@ public class HnswGraphBuilder implements HnswBuilder {
    * Reads all the vectors from vector values, builds a graph connecting them by their dense
    * ordinals, using the given hyperparameter settings, and returns the resulting graph.
    *
-   * @param scorerSupplier a supplier to create vector scorer from ordinals.
+   * @param scorer a scorer to compare vectors from ordinals.
    * @param M – graph fanout parameter used to calculate the maximum number of connections a node
    *     can have – M on upper layers, and M * 2 on the lowest level.
    * @param beamWidth the size of the beam search to use when finding nearest neighbors.
@@ -125,7 +120,7 @@ public class HnswGraphBuilder implements HnswBuilder {
    * @param hnsw the graph to build, can be previously initialized
    */
   protected HnswGraphBuilder(
-      RandomVectorScorerSupplier scorerSupplier,
+      RandomVectorScorer scorer,
       int M,
       int beamWidth,
       long seed,
@@ -139,8 +134,7 @@ public class HnswGraphBuilder implements HnswBuilder {
       throw new IllegalArgumentException("beamWidth must be positive");
     }
     this.M = M;
-    this.scorerSupplier =
-        Objects.requireNonNull(scorerSupplier, "scorer supplier must not be null");
+    this.scorer = Objects.requireNonNull(scorer, "scorer supplier must not be null");
     // normalization factor for level generation; currently not configurable
     this.ml = M == 1 ? 1 : 1 / Math.log(1.0 * M);
     this.random = new SplittableRandom(seed);
@@ -207,7 +201,6 @@ public class HnswGraphBuilder implements HnswBuilder {
        to the newly introduced levels (repeating step 2,3 for new levels) and again try to
        promote the node to entry node.
     */
-    RandomVectorScorer scorer = scorerSupplier.scorer(node);
     final int nodeLevel = getRandomGraphLevel(ml, random);
     // first add nodes to all levels
     for (int level = nodeLevel; level >= 0; level--) {
@@ -223,6 +216,7 @@ public class HnswGraphBuilder implements HnswBuilder {
     int lowestUnsetLevel = 0;
     int curMaxLevel;
     do {
+      scorer.setQueryOrd(node);
       curMaxLevel = hnsw.numLevels() - 1;
       // NOTE: the entry node and max level may not be paired, but because we get the level first
       // we ensure that the entry node we get later will always exist on the curMaxLevel
@@ -314,7 +308,7 @@ public class HnswGraphBuilder implements HnswBuilder {
       NeighborArray nbrsOfNbr = hnsw.getNeighbors(level, nbr);
       nbrsOfNbr.rwlock.writeLock().lock();
       try {
-        nbrsOfNbr.addAndEnsureDiversity(node, candidates.scores()[i], nbr, scorerSupplier);
+        nbrsOfNbr.addAndEnsureDiversity(node, candidates.scores()[i], nbr, scorer);
       } finally {
         nbrsOfNbr.rwlock.writeLock().unlock();
       }
@@ -365,7 +359,7 @@ public class HnswGraphBuilder implements HnswBuilder {
    */
   private boolean diversityCheck(int candidate, float score, NeighborArray neighbors)
       throws IOException {
-    RandomVectorScorer scorer = scorerSupplier.scorer(candidate);
+    scorer.setQueryOrd(candidate);
     for (int i = 0; i < neighbors.size(); i++) {
       float neighborSimilarity = scorer.score(neighbors.nodes()[i]);
       if (neighborSimilarity >= score) {

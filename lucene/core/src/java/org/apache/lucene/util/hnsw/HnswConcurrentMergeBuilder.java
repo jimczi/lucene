@@ -45,7 +45,7 @@ public class HnswConcurrentMergeBuilder implements HnswBuilder {
   public HnswConcurrentMergeBuilder(
       TaskExecutor taskExecutor,
       int numWorker,
-      RandomVectorScorerSupplier scorerSupplier,
+      RandomVectorScorer scorer,
       int M,
       int beamWidth,
       OnHeapHnswGraph hnsw,
@@ -57,7 +57,7 @@ public class HnswConcurrentMergeBuilder implements HnswBuilder {
     for (int i = 0; i < numWorker; i++) {
       workers[i] =
           new ConcurrentMergeWorker(
-              scorerSupplier.copy(),
+              scorer.copy(),
               M,
               beamWidth,
               HnswGraphBuilder.randSeed,
@@ -124,7 +124,7 @@ public class HnswConcurrentMergeBuilder implements HnswBuilder {
     private int batchSize = DEFAULT_BATCH_SIZE;
 
     private ConcurrentMergeWorker(
-        RandomVectorScorerSupplier scorerSupplier,
+        RandomVectorScorer scorer,
         int M,
         int beamWidth,
         long seed,
@@ -133,7 +133,7 @@ public class HnswConcurrentMergeBuilder implements HnswBuilder {
         AtomicInteger workProgress)
         throws IOException {
       super(
-          scorerSupplier,
+          scorer,
           M,
           beamWidth,
           seed,

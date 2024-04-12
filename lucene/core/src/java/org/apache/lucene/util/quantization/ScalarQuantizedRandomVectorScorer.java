@@ -27,8 +27,65 @@ import org.apache.lucene.util.hnsw.RandomVectorScorer;
  *
  * @lucene.experimental
  */
-public class ScalarQuantizedRandomVectorScorer
-    extends RandomVectorScorer.AbstractRandomVectorScorer {
+public class ScalarQuantizedRandomVectorScorer extends RandomVectorScorer {
+  private final VectorSimilarityFunction similarityFunction;
+  private final ScalarQuantizedVectorSimilarity similarity;
+  private final RandomAccessQuantizedByteVectorValues values;
+  private final RandomAccessQuantizedByteVectorValues values1;
+  private byte[] quantizedQuery;
+  private float queryOffset;
+
+  public ScalarQuantizedRandomVectorScorer(
+      VectorSimilarityFunction similarityFunction,
+      ScalarQuantizer scalarQuantizer,
+      RandomAccessQuantizedByteVectorValues values,
+      float[] query)
+      throws IOException {
+    super(values);
+    this.similarityFunction = similarityFunction;
+    this.similarity =
+        ScalarQuantizedVectorSimilarity.fromVectorSimilarity(
+            similarityFunction, scalarQuantizer.getConstantMultiplier(), scalarQuantizer.getBits());
+    this.values = values;
+    this.values1 = values.copy();
+    if (query != null) {
+      this.quantizedQuery = new byte[query.length];
+      this.queryOffset = quantizeQuery(query, quantizedQuery, similarityFunction, scalarQuantizer);
+    }
+  }
+
+  private ScalarQuantizedRandomVectorScorer(
+      VectorSimilarityFunction similarityFunction,
+      ScalarQuantizedVectorSimilarity similarity,
+      RandomAccessQuantizedByteVectorValues values)
+      throws IOException {
+    super(values);
+    this.similarityFunction = similarityFunction;
+    this.similarity = similarity;
+    this.values = values;
+    this.values1 = values.copy();
+  }
+
+  @Override
+  public RandomVectorScorer setQueryOrd(int ord) throws IOException {
+    this.quantizedQuery = values.vectorValue(ord);
+    this.queryOffset = values.getScoreCorrectionConstant();
+    return this;
+  }
+
+  @Override
+  public float score(int node) throws IOException {
+    assert quantizedQuery != null;
+    byte[] storedVectorValue = values1.vectorValue(node);
+    float storedVectorCorrection = values1.getScoreCorrectionConstant();
+    return similarity.score(
+        quantizedQuery, this.queryOffset, storedVectorValue, storedVectorCorrection);
+  }
+
+  @Override
+  public ScalarQuantizedRandomVectorScorer copy() throws IOException {
+    return new ScalarQuantizedRandomVectorScorer(similarityFunction, similarity, values.copy());
+  }
 
   public static float quantizeQuery(
       float[] query,
@@ -45,30 +102,5 @@ public class ScalarQuantizedRandomVectorScorer
           }
         };
     return scalarQuantizer.quantize(processedQuery, quantizedQuery, similarityFunction);
-  }
-
-  private final byte[] quantizedQuery;
-  private final float queryOffset;
-  private final RandomAccessQuantizedByteVectorValues values;
-  private final ScalarQuantizedVectorSimilarity similarity;
-
-  public ScalarQuantizedRandomVectorScorer(
-      ScalarQuantizedVectorSimilarity similarityFunction,
-      RandomAccessQuantizedByteVectorValues values,
-      byte[] query,
-      float queryOffset) {
-    super(values);
-    this.quantizedQuery = query;
-    this.queryOffset = queryOffset;
-    this.similarity = similarityFunction;
-    this.values = values;
-  }
-
-  @Override
-  public float score(int node) throws IOException {
-    byte[] storedVectorValue = values.vectorValue(node);
-    float storedVectorCorrection = values.getScoreCorrectionConstant();
-    return similarity.score(
-        quantizedQuery, this.queryOffset, storedVectorValue, storedVectorCorrection);
   }
 }

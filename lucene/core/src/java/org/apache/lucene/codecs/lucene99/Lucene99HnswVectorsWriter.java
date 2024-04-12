@@ -27,7 +27,6 @@ import java.util.List;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.KnnFieldVectorsWriter;
 import org.apache.lucene.codecs.KnnVectorsWriter;
-import org.apache.lucene.codecs.hnsw.FlatVectorsScorer;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.index.DocsWithFieldSet;
 import org.apache.lucene.index.FieldInfo;
@@ -42,7 +41,7 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.RamUsageEstimator;
-import org.apache.lucene.util.hnsw.CloseableRandomVectorScorerSupplier;
+import org.apache.lucene.util.hnsw.CloseableRandomVectorScorer;
 import org.apache.lucene.util.hnsw.ConcurrentHnswMerger;
 import org.apache.lucene.util.hnsw.HnswGraph;
 import org.apache.lucene.util.hnsw.HnswGraph.NodesIterator;
@@ -52,6 +51,7 @@ import org.apache.lucene.util.hnsw.IncrementalHnswGraphMerger;
 import org.apache.lucene.util.hnsw.NeighborArray;
 import org.apache.lucene.util.hnsw.OnHeapHnswGraph;
 import org.apache.lucene.util.hnsw.RandomAccessVectorValues;
+import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
 import org.apache.lucene.util.packed.DirectMonotonicWriter;
 
@@ -129,7 +129,7 @@ public final class Lucene99HnswVectorsWriter extends KnnVectorsWriter {
   public KnnFieldVectorsWriter<?> addField(FieldInfo fieldInfo) throws IOException {
     FieldWriter<?> newField =
         FieldWriter.create(
-            flatVectorWriter.getFlatVectorScorer(),
+            flatVectorWriter.getRandomVectorScorerSupplier(),
             fieldInfo,
             M,
             beamWidth,
@@ -345,7 +345,7 @@ public final class Lucene99HnswVectorsWriter extends KnnVectorsWriter {
 
   @Override
   public void mergeOneField(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
-    CloseableRandomVectorScorerSupplier scorerSupplier =
+    CloseableRandomVectorScorer scorer =
         flatVectorWriter.mergeOneFieldToIndex(fieldInfo, mergeState);
     boolean success = false;
     try {
@@ -356,12 +356,12 @@ public final class Lucene99HnswVectorsWriter extends KnnVectorsWriter {
       // TODO: separate random access vector values from DocIdSetIterator?
       OnHeapHnswGraph graph = null;
       int[][] vectorIndexNodeOffsets = null;
-      if (scorerSupplier.totalVectorCount() > 0) {
+      if (scorer.totalVectorCount() > 0) {
         // build graph
         HnswGraphMerger merger =
             createGraphMerger(
                 fieldInfo,
-                scorerSupplier,
+                scorer.getScorer(),
                 mergeState.intraMergeTaskExecutor == null
                     ? null
                     : new TaskExecutor(mergeState.intraMergeTaskExecutor),
@@ -379,9 +379,7 @@ public final class Lucene99HnswVectorsWriter extends KnnVectorsWriter {
         }
         graph =
             merger.merge(
-                mergedVectorIterator,
-                segmentWriteState.infoStream,
-                scorerSupplier.totalVectorCount());
+                mergedVectorIterator, segmentWriteState.infoStream, scorer.totalVectorCount());
         vectorIndexNodeOffsets = writeGraph(graph);
       }
       long vectorIndexLength = vectorIndex.getFilePointer() - vectorIndexOffset;
@@ -389,15 +387,15 @@ public final class Lucene99HnswVectorsWriter extends KnnVectorsWriter {
           fieldInfo,
           vectorIndexOffset,
           vectorIndexLength,
-          scorerSupplier.totalVectorCount(),
+          scorer.totalVectorCount(),
           graph,
           vectorIndexNodeOffsets);
       success = true;
     } finally {
       if (success) {
-        IOUtils.close(scorerSupplier);
+        IOUtils.close(scorer);
       } else {
-        IOUtils.closeWhileHandlingException(scorerSupplier);
+        IOUtils.closeWhileHandlingException(scorer);
       }
     }
   }
@@ -503,23 +501,17 @@ public final class Lucene99HnswVectorsWriter extends KnnVectorsWriter {
 
   private HnswGraphMerger createGraphMerger(
       FieldInfo fieldInfo,
-      RandomVectorScorerSupplier scorerSupplier,
+      RandomVectorScorer scorer,
       TaskExecutor parallelMergeTaskExecutor,
       int numParallelMergeWorkers) {
     if (mergeExec != null) {
-      return new ConcurrentHnswMerger(
-          fieldInfo, scorerSupplier, M, beamWidth, mergeExec, numMergeWorkers);
+      return new ConcurrentHnswMerger(fieldInfo, scorer, M, beamWidth, mergeExec, numMergeWorkers);
     }
     if (parallelMergeTaskExecutor != null) {
       return new ConcurrentHnswMerger(
-          fieldInfo,
-          scorerSupplier,
-          M,
-          beamWidth,
-          parallelMergeTaskExecutor,
-          numParallelMergeWorkers);
+          fieldInfo, scorer, M, beamWidth, parallelMergeTaskExecutor, numParallelMergeWorkers);
     }
-    return new IncrementalHnswGraphMerger(fieldInfo, scorerSupplier, M, beamWidth);
+    return new IncrementalHnswGraphMerger(fieldInfo, scorer, M, beamWidth);
   }
 
   @Override
@@ -549,34 +541,42 @@ public final class Lucene99HnswVectorsWriter extends KnnVectorsWriter {
     private int node = 0;
 
     static FieldWriter<?> create(
-        FlatVectorsScorer scorer, FieldInfo fieldInfo, int M, int beamWidth, InfoStream infoStream)
+        RandomVectorScorerSupplier scorerSupplier,
+        FieldInfo fieldInfo,
+        int M,
+        int beamWidth,
+        InfoStream infoStream)
         throws IOException {
       return switch (fieldInfo.getVectorEncoding()) {
-        case BYTE -> new FieldWriter<byte[]>(scorer, fieldInfo, M, beamWidth, infoStream);
-        case FLOAT32 -> new FieldWriter<float[]>(scorer, fieldInfo, M, beamWidth, infoStream);
+        case BYTE -> new FieldWriter<byte[]>(scorerSupplier, fieldInfo, M, beamWidth, infoStream);
+        case FLOAT32 -> new FieldWriter<float[]>(
+            scorerSupplier, fieldInfo, M, beamWidth, infoStream);
       };
     }
 
     @SuppressWarnings("unchecked")
     FieldWriter(
-        FlatVectorsScorer scorer, FieldInfo fieldInfo, int M, int beamWidth, InfoStream infoStream)
+        RandomVectorScorerSupplier scorerSupplier,
+        FieldInfo fieldInfo,
+        int M,
+        int beamWidth,
+        InfoStream infoStream)
         throws IOException {
       this.fieldInfo = fieldInfo;
       this.docsWithField = new DocsWithFieldSet();
       vectors = new ArrayList<>();
-      RandomVectorScorerSupplier scorerSupplier =
+      RandomVectorScorer scorer =
           switch (fieldInfo.getVectorEncoding()) {
-            case BYTE -> scorer.getRandomVectorScorerSupplier(
-                fieldInfo.getVectorSimilarityFunction(),
+            case BYTE -> scorerSupplier.create(
                 RandomAccessVectorValues.fromBytes(
-                    (List<byte[]>) vectors, fieldInfo.getVectorDimension()));
-            case FLOAT32 -> scorer.getRandomVectorScorerSupplier(
-                fieldInfo.getVectorSimilarityFunction(),
+                    (List<byte[]>) vectors, fieldInfo.getVectorDimension()),
+                fieldInfo.getVectorSimilarityFunction());
+            case FLOAT32 -> scorerSupplier.create(
                 RandomAccessVectorValues.fromFloats(
-                    (List<float[]>) vectors, fieldInfo.getVectorDimension()));
+                    (List<float[]>) vectors, fieldInfo.getVectorDimension()),
+                fieldInfo.getVectorSimilarityFunction());
           };
-      hnswGraphBuilder =
-          HnswGraphBuilder.create(scorerSupplier, M, beamWidth, HnswGraphBuilder.randSeed);
+      hnswGraphBuilder = HnswGraphBuilder.create(scorer, M, beamWidth, HnswGraphBuilder.randSeed);
       hnswGraphBuilder.setInfoStream(infoStream);
     }
 

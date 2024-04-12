@@ -22,7 +22,6 @@ import java.util.concurrent.ExecutorService;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.KnnVectorsWriter;
-import org.apache.lucene.codecs.hnsw.DefaultFlatVectorScorer;
 import org.apache.lucene.codecs.hnsw.FlatVectorsFormat;
 import org.apache.lucene.codecs.lucene90.IndexedDISI;
 import org.apache.lucene.index.MergePolicy;
@@ -32,6 +31,7 @@ import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.util.hnsw.DefaultRandomVectorScorerSupplier;
 import org.apache.lucene.util.hnsw.HnswGraph;
 
 /**
@@ -139,7 +139,7 @@ public final class Lucene99HnswVectorsFormat extends KnnVectorsFormat {
 
   /** The format for storing, reading, merging vectors on disk */
   private static final FlatVectorsFormat flatVectorsFormat =
-      new Lucene99FlatVectorsFormat(new DefaultFlatVectorScorer());
+      new Lucene99FlatVectorsFormat(new DefaultRandomVectorScorerSupplier());
 
   private final int numMergeWorkers;
   private final TaskExecutor mergeExec;

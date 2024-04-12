@@ -18,13 +18,13 @@
 package org.apache.lucene.codecs.lucene99;
 
 import java.io.IOException;
-import org.apache.lucene.codecs.hnsw.DefaultFlatVectorScorer;
 import org.apache.lucene.codecs.hnsw.FlatVectorsFormat;
 import org.apache.lucene.codecs.hnsw.FlatVectorsReader;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
-import org.apache.lucene.codecs.hnsw.ScalarQuantizedVectorScorer;
+import org.apache.lucene.codecs.hnsw.ScalarQuantizedVectorScorerSupplier;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
+import org.apache.lucene.util.hnsw.DefaultRandomVectorScorerSupplier;
 
 /**
  * Format supporting vector quantization, storage, and retrieval
@@ -49,7 +49,7 @@ public final class Lucene99ScalarQuantizedVectorsFormat extends FlatVectorsForma
   static final String VECTOR_DATA_EXTENSION = "veq";
 
   private static final FlatVectorsFormat rawVectorFormat =
-      new Lucene99FlatVectorsFormat(new DefaultFlatVectorScorer());
+      new Lucene99FlatVectorsFormat(new DefaultRandomVectorScorerSupplier());
 
   /** The minimum confidence interval */
   private static final float MINIMUM_CONFIDENCE_INTERVAL = 0.9f;
@@ -65,7 +65,7 @@ public final class Lucene99ScalarQuantizedVectorsFormat extends FlatVectorsForma
 
   final byte bits;
   final boolean compress;
-  final ScalarQuantizedVectorScorer flatVectorScorer;
+  final ScalarQuantizedVectorScorerSupplier scorerSupplier;
 
   /** Constructs a format using default graph construction parameters */
   public Lucene99ScalarQuantizedVectorsFormat() {
@@ -102,7 +102,8 @@ public final class Lucene99ScalarQuantizedVectorsFormat extends FlatVectorsForma
     this.bits = (byte) bits;
     this.confidenceInterval = confidenceInterval;
     this.compress = compress;
-    this.flatVectorScorer = new ScalarQuantizedVectorScorer(new DefaultFlatVectorScorer());
+    this.scorerSupplier =
+        new ScalarQuantizedVectorScorerSupplier(new DefaultRandomVectorScorerSupplier());
   }
 
   public static float calculateDefaultConfidenceInterval(int vectorDimension) {
@@ -120,8 +121,8 @@ public final class Lucene99ScalarQuantizedVectorsFormat extends FlatVectorsForma
         + bits
         + ", compress="
         + compress
-        + ", flatVectorScorer="
-        + flatVectorScorer
+        + ", scorerSupplier="
+        + scorerSupplier
         + ", rawVectorFormat="
         + rawVectorFormat
         + ")";
@@ -135,12 +136,12 @@ public final class Lucene99ScalarQuantizedVectorsFormat extends FlatVectorsForma
         bits,
         compress,
         rawVectorFormat.fieldsWriter(state),
-        flatVectorScorer);
+        scorerSupplier);
   }
 
   @Override
   public FlatVectorsReader fieldsReader(SegmentReadState state) throws IOException {
     return new Lucene99ScalarQuantizedVectorsReader(
-        state, rawVectorFormat.fieldsReader(state), flatVectorScorer);
+        state, rawVectorFormat.fieldsReader(state), scorerSupplier);
   }
 }

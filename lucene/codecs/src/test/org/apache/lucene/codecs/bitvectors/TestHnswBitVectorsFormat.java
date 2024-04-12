@@ -113,7 +113,7 @@ public class TestHnswBitVectorsFormat extends BaseIndexFileFormatTestCase {
           }
         };
     String expectedString =
-        "HnswBitVectorsFormat(name=HnswBitVectorsFormat, maxConn=10, beamWidth=20, flatVectorFormat=Lucene99FlatVectorsFormat(vectorsScorer=FlatBitVectorsScorer()))";
+        "HnswBitVectorsFormat(name=HnswBitVectorsFormat, maxConn=10, beamWidth=20, flatVectorFormat=Lucene99FlatVectorsFormat(scorerSupplier=BitRandomVectorScorerSupplier()))";
     assertEquals(expectedString, customCodec.knnVectorsFormat().toString());
   }
 

@@ -25,7 +25,8 @@ import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.Sorter;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.IOUtils;
-import org.apache.lucene.util.hnsw.CloseableRandomVectorScorerSupplier;
+import org.apache.lucene.util.hnsw.CloseableRandomVectorScorer;
+import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
 
 /**
  * Vectors' writer for a field that allows additional indexing logic to be implemented by the caller
@@ -34,18 +35,18 @@ import org.apache.lucene.util.hnsw.CloseableRandomVectorScorerSupplier;
  */
 public abstract class FlatVectorsWriter implements Accountable, Closeable {
   /** Scorer for flat vectors */
-  protected final FlatVectorsScorer vectorsScorer;
+  protected final RandomVectorScorerSupplier scorerSupplier;
 
   /** Sole constructor */
-  protected FlatVectorsWriter(FlatVectorsScorer vectorsScorer) {
-    this.vectorsScorer = vectorsScorer;
+  protected FlatVectorsWriter(RandomVectorScorerSupplier scorerSupplier) {
+    this.scorerSupplier = scorerSupplier;
   }
 
   /**
-   * @return the {@link FlatVectorsScorer} for this reader.
+   * @return the {@link RandomVectorScorerSupplier} for this reader.
    */
-  public FlatVectorsScorer getFlatVectorScorer() {
-    return vectorsScorer;
+  public RandomVectorScorerSupplier getRandomVectorScorerSupplier() {
+    return scorerSupplier;
   }
 
   /**
@@ -70,7 +71,7 @@ public abstract class FlatVectorsWriter implements Accountable, Closeable {
    *     temporary file handle to read over the newly merged vectors
    * @throws IOException if an I/O error occurs when merging
    */
-  public abstract CloseableRandomVectorScorerSupplier mergeOneFieldToIndex(
+  public abstract CloseableRandomVectorScorer mergeOneFieldToIndex(
       FieldInfo fieldInfo, MergeState mergeState) throws IOException;
 
   /** Write field for merging */

@@ -35,12 +35,12 @@ public class ConcurrentHnswMerger extends IncrementalHnswGraphMerger {
    */
   public ConcurrentHnswMerger(
       FieldInfo fieldInfo,
-      RandomVectorScorerSupplier scorerSupplier,
+      RandomVectorScorer scorer,
       int M,
       int beamWidth,
       TaskExecutor taskExecutor,
       int numWorker) {
-    super(fieldInfo, scorerSupplier, M, beamWidth);
+    super(fieldInfo, scorer, M, beamWidth);
     this.taskExecutor = taskExecutor;
     this.numWorker = numWorker;
   }
@@ -50,13 +50,7 @@ public class ConcurrentHnswMerger extends IncrementalHnswGraphMerger {
       throws IOException {
     if (initReader == null) {
       return new HnswConcurrentMergeBuilder(
-          taskExecutor,
-          numWorker,
-          scorerSupplier,
-          M,
-          beamWidth,
-          new OnHeapHnswGraph(M, maxOrd),
-          null);
+          taskExecutor, numWorker, scorer, M, beamWidth, new OnHeapHnswGraph(M, maxOrd), null);
     }
 
     HnswGraph initializerGraph = ((HnswGraphProvider) initReader).getGraph(fieldInfo.name);
@@ -66,7 +60,7 @@ public class ConcurrentHnswMerger extends IncrementalHnswGraphMerger {
     return new HnswConcurrentMergeBuilder(
         taskExecutor,
         numWorker,
-        scorerSupplier,
+        scorer,
         M,
         beamWidth,
         InitializedHnswGraphBuilder.initGraph(M, initializerGraph, oldToNewOrdinalMap, maxOrd),

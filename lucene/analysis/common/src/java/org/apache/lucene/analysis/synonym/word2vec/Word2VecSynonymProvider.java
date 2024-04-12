@@ -27,6 +27,7 @@ import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.KnnCollector;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.hnsw.DefaultRandomVectorScorerSupplier;
 import org.apache.lucene.util.hnsw.HnswGraphBuilder;
 import org.apache.lucene.util.hnsw.HnswGraphSearcher;
 import org.apache.lucene.util.hnsw.OnHeapHnswGraph;
@@ -44,6 +45,7 @@ public class Word2VecSynonymProvider {
       VectorSimilarityFunction.DOT_PRODUCT;
   private final Word2VecModel word2VecModel;
   private final OnHeapHnswGraph hnswGraph;
+  private final RandomVectorScorerSupplier scorerSupplier;
 
   /**
    * Word2VecSynonymProvider constructor
@@ -52,16 +54,17 @@ public class Word2VecSynonymProvider {
    */
   public Word2VecSynonymProvider(Word2VecModel model) throws IOException {
     this.word2VecModel = model;
-    RandomVectorScorerSupplier scorerSupplier =
-        RandomVectorScorerSupplier.createFloats(word2VecModel, SIMILARITY_FUNCTION);
+    RandomVectorScorer scorer =
+        new DefaultRandomVectorScorerSupplier().create(word2VecModel, SIMILARITY_FUNCTION);
     HnswGraphBuilder builder =
         HnswGraphBuilder.create(
-            scorerSupplier,
+            scorer,
             DEFAULT_MAX_CONN,
             DEFAULT_BEAM_WIDTH,
             HnswGraphBuilder.randSeed,
             word2VecModel.size());
     this.hnswGraph = builder.build(word2VecModel.size());
+    this.scorerSupplier = new DefaultRandomVectorScorerSupplier();
   }
 
   public List<TermAndBoost> getSynonyms(
@@ -74,8 +77,7 @@ public class Word2VecSynonymProvider {
     LinkedList<TermAndBoost> result = new LinkedList<>();
     float[] query = word2VecModel.vectorValue(term);
     if (query != null) {
-      RandomVectorScorer scorer =
-          RandomVectorScorer.createFloats(word2VecModel, SIMILARITY_FUNCTION, query);
+      RandomVectorScorer scorer = scorerSupplier.create(word2VecModel, SIMILARITY_FUNCTION, query);
       KnnCollector synonyms =
           HnswGraphSearcher.search(
               scorer,

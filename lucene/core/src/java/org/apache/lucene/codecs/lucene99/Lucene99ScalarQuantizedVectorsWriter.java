@@ -34,7 +34,6 @@ import org.apache.lucene.codecs.KnnFieldVectorsWriter;
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.KnnVectorsWriter;
 import org.apache.lucene.codecs.hnsw.FlatFieldVectorsWriter;
-import org.apache.lucene.codecs.hnsw.FlatVectorsScorer;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.codecs.lucene95.OrdToDocDISIReaderConfiguration;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
@@ -55,7 +54,7 @@ import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.VectorUtil;
-import org.apache.lucene.util.hnsw.CloseableRandomVectorScorerSupplier;
+import org.apache.lucene.util.hnsw.CloseableRandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
 import org.apache.lucene.util.quantization.QuantizedByteVectorValues;
@@ -106,7 +105,7 @@ public final class Lucene99ScalarQuantizedVectorsWriter extends FlatVectorsWrite
       byte bits,
       boolean compress,
       FlatVectorsWriter rawVectorDelegate,
-      FlatVectorsScorer scorer)
+      RandomVectorScorerSupplier scorer)
       throws IOException {
     super(scorer);
     this.confidenceInterval = confidenceInterval;
@@ -207,7 +206,7 @@ public final class Lucene99ScalarQuantizedVectorsWriter extends FlatVectorsWrite
   }
 
   @Override
-  public CloseableRandomVectorScorerSupplier mergeOneFieldToIndex(
+  public CloseableRandomVectorScorer mergeOneFieldToIndex(
       FieldInfo fieldInfo, MergeState mergeState) throws IOException {
     if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)) {
       // Simply merge the underlying delegate, which just copies the raw vector data to a new
@@ -417,7 +416,7 @@ public final class Lucene99ScalarQuantizedVectorsWriter extends FlatVectorsWrite
     }
   }
 
-  private ScalarQuantizedCloseableRandomVectorScorerSupplier mergeOneFieldToIndex(
+  private ScalarQuantizedCloseableRandomVectorScorer mergeOneFieldToIndex(
       SegmentWriteState segmentWriteState,
       FieldInfo fieldInfo,
       MergeState mergeState,
@@ -472,20 +471,20 @@ public final class Lucene99ScalarQuantizedVectorsWriter extends FlatVectorsWrite
           docsWithField);
       success = true;
       final IndexInput finalQuantizationDataInput = quantizationDataInput;
-      return new ScalarQuantizedCloseableRandomVectorScorerSupplier(
+      return new ScalarQuantizedCloseableRandomVectorScorer(
           () -> {
             IOUtils.close(finalQuantizationDataInput);
             segmentWriteState.directory.deleteFile(tempQuantizedVectorData.getName());
           },
           docsWithField.cardinality(),
-          vectorsScorer.getRandomVectorScorerSupplier(
-              fieldInfo.getVectorSimilarityFunction(),
+          scorerSupplier.create(
               new OffHeapQuantizedByteVectorValues.DenseOffHeapVectorValues(
                   fieldInfo.getVectorDimension(),
                   docsWithField.cardinality(),
                   mergedQuantizationState,
                   compress,
-                  quantizationDataInput)));
+                  quantizationDataInput),
+              fieldInfo.getVectorSimilarityFunction()));
     } finally {
       if (success == false) {
         IOUtils.closeWhileHandlingException(tempQuantizedVectorData, quantizationDataInput);
@@ -1054,28 +1053,18 @@ public final class Lucene99ScalarQuantizedVectorsWriter extends FlatVectorsWrite
     }
   }
 
-  static final class ScalarQuantizedCloseableRandomVectorScorerSupplier
-      implements CloseableRandomVectorScorerSupplier {
+  static final class ScalarQuantizedCloseableRandomVectorScorer
+      implements CloseableRandomVectorScorer {
 
-    private final RandomVectorScorerSupplier supplier;
+    private final RandomVectorScorer scorer;
     private final Closeable onClose;
     private final int numVectors;
 
-    ScalarQuantizedCloseableRandomVectorScorerSupplier(
-        Closeable onClose, int numVectors, RandomVectorScorerSupplier supplier) {
+    ScalarQuantizedCloseableRandomVectorScorer(
+        Closeable onClose, int numVectors, RandomVectorScorer scorer) {
       this.onClose = onClose;
-      this.supplier = supplier;
+      this.scorer = scorer;
       this.numVectors = numVectors;
-    }
-
-    @Override
-    public RandomVectorScorer scorer(int ord) throws IOException {
-      return supplier.scorer(ord);
-    }
-
-    @Override
-    public RandomVectorScorerSupplier copy() throws IOException {
-      return supplier.copy();
     }
 
     @Override
@@ -1086,6 +1075,11 @@ public final class Lucene99ScalarQuantizedVectorsWriter extends FlatVectorsWrite
     @Override
     public int totalVectorCount() {
       return numVectors;
+    }
+
+    @Override
+    public RandomVectorScorer getScorer() {
+      return scorer;
     }
   }
 

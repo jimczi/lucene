@@ -20,13 +20,13 @@ package org.apache.lucene.codecs.lucene99;
 import java.io.IOException;
 import org.apache.lucene.codecs.hnsw.FlatVectorsFormat;
 import org.apache.lucene.codecs.hnsw.FlatVectorsReader;
-import org.apache.lucene.codecs.hnsw.FlatVectorsScorer;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.codecs.lucene90.IndexedDISI;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
 
 /**
  * Lucene 9.9 flat vector format, which encodes numeric vector values
@@ -76,25 +76,25 @@ public final class Lucene99FlatVectorsFormat extends FlatVectorsFormat {
   public static final int VERSION_CURRENT = VERSION_START;
 
   static final int DIRECT_MONOTONIC_BLOCK_SHIFT = 16;
-  private final FlatVectorsScorer vectorsScorer;
+  private final RandomVectorScorerSupplier scorerSupplier;
 
   /** Constructs a format */
-  public Lucene99FlatVectorsFormat(FlatVectorsScorer vectorsScorer) {
-    this.vectorsScorer = vectorsScorer;
+  public Lucene99FlatVectorsFormat(RandomVectorScorerSupplier scorerSupplier) {
+    this.scorerSupplier = scorerSupplier;
   }
 
   @Override
   public FlatVectorsWriter fieldsWriter(SegmentWriteState state) throws IOException {
-    return new Lucene99FlatVectorsWriter(state, vectorsScorer);
+    return new Lucene99FlatVectorsWriter(state, scorerSupplier);
   }
 
   @Override
   public FlatVectorsReader fieldsReader(SegmentReadState state) throws IOException {
-    return new Lucene99FlatVectorsReader(state, vectorsScorer);
+    return new Lucene99FlatVectorsReader(state, scorerSupplier);
   }
 
   @Override
   public String toString() {
-    return "Lucene99FlatVectorsFormat(" + "vectorsScorer=" + vectorsScorer + ')';
+    return "Lucene99FlatVectorsFormat(" + "scorerSupplier=" + scorerSupplier + ')';
   }
 }

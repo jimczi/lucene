@@ -682,6 +682,7 @@ abstract class BaseKnnVectorQueryTestCase extends LuceneTestCase {
               toDelete.contains(new Term("index", index)));
           allIds.add(index);
         }
+        System.out.println("MAXDOC=" + reader.maxDoc() + " " + reader.numDocs());
         assertEquals("search missed some documents", hits, allIds.size());
       }
     }

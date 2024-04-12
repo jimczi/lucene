@@ -24,6 +24,7 @@ import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
+import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
 
 /**
  * Reads vectors from an index. When searching this reader, it iterates every vector in the index
@@ -42,18 +43,11 @@ import org.apache.lucene.util.hnsw.RandomVectorScorer;
 public abstract class FlatVectorsReader implements Closeable, Accountable {
 
   /** Scorer for flat vectors */
-  protected final FlatVectorsScorer vectorScorer;
+  protected final RandomVectorScorerSupplier scorerSupplier;
 
   /** Sole constructor */
-  protected FlatVectorsReader(FlatVectorsScorer vectorsScorer) {
-    this.vectorScorer = vectorsScorer;
-  }
-
-  /**
-   * @return the {@link FlatVectorsScorer} for this reader.
-   */
-  public FlatVectorsScorer getFlatVectorScorer() {
-    return vectorScorer;
+  protected FlatVectorsReader(RandomVectorScorerSupplier scorerSupplier) {
+    this.scorerSupplier = scorerSupplier;
   }
 
   /**

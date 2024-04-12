@@ -20,108 +20,40 @@ package org.apache.lucene.util.hnsw;
 import java.io.IOException;
 import org.apache.lucene.index.VectorSimilarityFunction;
 
-/** A supplier that creates {@link RandomVectorScorer} from an ordinal. */
+/** A supplier that creates {@link RandomVectorScorer}. */
 public interface RandomVectorScorerSupplier {
   /**
-   * This creates a {@link RandomVectorScorer} for scoring random nodes in batches against the given
-   * ordinal.
+   * Creates a {@link RandomVectorScorer} that can score vectors from ordinals.
    *
-   * @param ord the ordinal of the node to compare
-   * @return a new {@link RandomVectorScorer}
+   * @param values The vector values
+   * @param similarityFunction The configured similarity function
+   * @return A {@link RandomVectorScorer} that can score vectors from ordinals.
    */
-  RandomVectorScorer scorer(int ord) throws IOException;
+  RandomVectorScorer create(
+      RandomAccessVectorValues values, VectorSimilarityFunction similarityFunction)
+      throws IOException;
 
   /**
-   * Make a copy of the supplier, which will copy the underlying vectorValues so the copy is safe to
-   * be used in other threads.
+   * Creates a {@link RandomVectorScorer} that can score vectors from ordinals against a provided
+   * floats vector.
+   *
+   * @param values The vector values
+   * @param similarityFunction The configured similarity function
+   * @return A {@link RandomVectorScorer} that can score vectors from ordinals.
    */
-  RandomVectorScorerSupplier copy() throws IOException;
+  RandomVectorScorer create(
+      RandomAccessVectorValues values, VectorSimilarityFunction similarityFunction, float[] query)
+      throws IOException;
 
   /**
-   * Creates a {@link RandomVectorScorerSupplier} to compare float vectors. The vectorValues passed
-   * in will be copied and the original copy will not be used.
+   * Creates a {@link RandomVectorScorer} that can score vectors from ordinals against a provided
+   * bytes vector.
    *
-   * @param vectors the underlying storage for vectors
-   * @param similarityFunction the similarity function to score vectors
+   * @param values The vector values
+   * @param similarityFunction The configured similarity function
+   * @return A {@link RandomVectorScorer} that can score vectors from ordinals.
    */
-  static RandomVectorScorerSupplier createFloats(
-      final RandomAccessVectorValues.Floats vectors,
-      final VectorSimilarityFunction similarityFunction)
-      throws IOException {
-    // We copy the provided random accessor just once during the supplier's initialization
-    // and then reuse it consistently across all scorers for conducting vector comparisons.
-    return new FloatScoringSupplier(vectors, similarityFunction);
-  }
-
-  /**
-   * Creates a {@link RandomVectorScorerSupplier} to compare byte vectors. The vectorValues passed
-   * in will be copied and the original copy will not be used.
-   *
-   * @param vectors the underlying storage for vectors
-   * @param similarityFunction the similarity function to score vectors
-   */
-  static RandomVectorScorerSupplier createBytes(
-      final RandomAccessVectorValues.Bytes vectors,
-      final VectorSimilarityFunction similarityFunction)
-      throws IOException {
-    // We copy the provided random accessor only during the supplier's initialization
-    // and then reuse it consistently across all scorers for conducting vector comparisons.
-    return new ByteScoringSupplier(vectors, similarityFunction);
-  }
-
-  /** RandomVectorScorerSupplier for bytes vector */
-  final class ByteScoringSupplier implements RandomVectorScorerSupplier {
-    private final RandomAccessVectorValues.Bytes vectors;
-    private final RandomAccessVectorValues.Bytes vectors1;
-    private final RandomAccessVectorValues.Bytes vectors2;
-    private final VectorSimilarityFunction similarityFunction;
-
-    private ByteScoringSupplier(
-        RandomAccessVectorValues.Bytes vectors, VectorSimilarityFunction similarityFunction)
-        throws IOException {
-      this.vectors = vectors;
-      vectors1 = vectors.copy();
-      vectors2 = vectors.copy();
-      this.similarityFunction = similarityFunction;
-    }
-
-    @Override
-    public RandomVectorScorer scorer(int ord) throws IOException {
-      return new RandomVectorScorer.ByteVectorScorer(
-          vectors2, vectors1.vectorValue(ord), similarityFunction);
-    }
-
-    @Override
-    public RandomVectorScorerSupplier copy() throws IOException {
-      return new ByteScoringSupplier(vectors, similarityFunction);
-    }
-  }
-
-  /** RandomVectorScorerSupplier for Float vector */
-  final class FloatScoringSupplier implements RandomVectorScorerSupplier {
-    private final RandomAccessVectorValues.Floats vectors;
-    private final RandomAccessVectorValues.Floats vectors1;
-    private final RandomAccessVectorValues.Floats vectors2;
-    private final VectorSimilarityFunction similarityFunction;
-
-    private FloatScoringSupplier(
-        RandomAccessVectorValues.Floats vectors, VectorSimilarityFunction similarityFunction)
-        throws IOException {
-      this.vectors = vectors;
-      vectors1 = vectors.copy();
-      vectors2 = vectors.copy();
-      this.similarityFunction = similarityFunction;
-    }
-
-    @Override
-    public RandomVectorScorer scorer(int ord) throws IOException {
-      return new RandomVectorScorer.FloatVectorScorer(
-          vectors2, vectors1.vectorValue(ord), similarityFunction);
-    }
-
-    @Override
-    public RandomVectorScorerSupplier copy() throws IOException {
-      return new FloatScoringSupplier(vectors, similarityFunction);
-    }
-  }
+  RandomVectorScorer create(
+      RandomAccessVectorValues values, VectorSimilarityFunction similarityFunction, byte[] query)
+      throws IOException;
 }

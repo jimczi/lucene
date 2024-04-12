@@ -25,7 +25,6 @@ import java.util.HashMap;
 import java.util.Map;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.hnsw.FlatVectorsReader;
-import org.apache.lucene.codecs.hnsw.FlatVectorsScorer;
 import org.apache.lucene.codecs.lucene95.OffHeapByteVectorValues;
 import org.apache.lucene.codecs.lucene95.OffHeapFloatVectorValues;
 import org.apache.lucene.codecs.lucene95.OrdToDocDISIReaderConfiguration;
@@ -46,6 +45,7 @@ import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
+import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
 
 /**
  * Reads vectors from the index segments.
@@ -60,7 +60,7 @@ public final class Lucene99FlatVectorsReader extends FlatVectorsReader {
   private final Map<String, FieldEntry> fields = new HashMap<>();
   private final IndexInput vectorData;
 
-  public Lucene99FlatVectorsReader(SegmentReadState state, FlatVectorsScorer scorer)
+  public Lucene99FlatVectorsReader(SegmentReadState state, RandomVectorScorerSupplier scorer)
       throws IOException {
     super(scorer);
     int versionMeta = readMetadata(state);
@@ -270,8 +270,7 @@ public final class Lucene99FlatVectorsReader extends FlatVectorsReader {
     if (fieldEntry == null || fieldEntry.vectorEncoding != VectorEncoding.FLOAT32) {
       return null;
     }
-    return vectorScorer.getRandomVectorScorer(
-        fieldEntry.similarityFunction,
+    return scorerSupplier.create(
         OffHeapFloatVectorValues.load(
             fieldEntry.ordToDoc,
             fieldEntry.vectorEncoding,
@@ -279,6 +278,7 @@ public final class Lucene99FlatVectorsReader extends FlatVectorsReader {
             fieldEntry.vectorDataOffset,
             fieldEntry.vectorDataLength,
             vectorData),
+        fieldEntry.similarityFunction,
         target);
   }
 
@@ -288,8 +288,7 @@ public final class Lucene99FlatVectorsReader extends FlatVectorsReader {
     if (fieldEntry == null || fieldEntry.vectorEncoding != VectorEncoding.BYTE) {
       return null;
     }
-    return vectorScorer.getRandomVectorScorer(
-        fieldEntry.similarityFunction,
+    return scorerSupplier.create(
         OffHeapByteVectorValues.load(
             fieldEntry.ordToDoc,
             fieldEntry.vectorEncoding,
@@ -297,6 +296,7 @@ public final class Lucene99FlatVectorsReader extends FlatVectorsReader {
             fieldEntry.vectorDataOffset,
             fieldEntry.vectorDataLength,
             vectorData),
+        fieldEntry.similarityFunction,
         target);
   }
 

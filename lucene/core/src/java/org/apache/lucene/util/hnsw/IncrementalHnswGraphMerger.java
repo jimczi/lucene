@@ -42,7 +42,7 @@ import org.apache.lucene.util.hppc.IntIntHashMap;
 public class IncrementalHnswGraphMerger implements HnswGraphMerger {
 
   protected final FieldInfo fieldInfo;
-  protected final RandomVectorScorerSupplier scorerSupplier;
+  protected final RandomVectorScorer scorer;
   protected final int M;
   protected final int beamWidth;
 
@@ -54,9 +54,9 @@ public class IncrementalHnswGraphMerger implements HnswGraphMerger {
    * @param fieldInfo FieldInfo for the field being merged
    */
   public IncrementalHnswGraphMerger(
-      FieldInfo fieldInfo, RandomVectorScorerSupplier scorerSupplier, int M, int beamWidth) {
+      FieldInfo fieldInfo, RandomVectorScorer scorer, int M, int beamWidth) {
     this.fieldInfo = fieldInfo;
-    this.scorerSupplier = scorerSupplier;
+    this.scorer = scorer;
     this.M = M;
     this.beamWidth = beamWidth;
   }
@@ -116,8 +116,7 @@ public class IncrementalHnswGraphMerger implements HnswGraphMerger {
   protected HnswBuilder createBuilder(DocIdSetIterator mergedVectorIterator, int maxOrd)
       throws IOException {
     if (initReader == null) {
-      return HnswGraphBuilder.create(
-          scorerSupplier, M, beamWidth, HnswGraphBuilder.randSeed, maxOrd);
+      return HnswGraphBuilder.create(scorer, M, beamWidth, HnswGraphBuilder.randSeed, maxOrd);
     }
 
     HnswGraph initializerGraph = ((HnswGraphProvider) initReader).getGraph(fieldInfo.name);
@@ -125,7 +124,7 @@ public class IncrementalHnswGraphMerger implements HnswGraphMerger {
     BitSet initializedNodes = new FixedBitSet(maxOrd);
     int[] oldToNewOrdinalMap = getNewOrdMapping(mergedVectorIterator, initializedNodes);
     return InitializedHnswGraphBuilder.fromGraph(
-        scorerSupplier,
+        scorer,
         M,
         beamWidth,
         HnswGraphBuilder.randSeed,

@@ -48,6 +48,7 @@ import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.lucene.util.hnsw.DefaultRandomVectorScorerSupplier;
 import org.apache.lucene.util.hnsw.HnswGraph;
 import org.apache.lucene.util.hnsw.HnswGraphSearcher;
 import org.apache.lucene.util.hnsw.OrdinalTranslatedKnnCollector;
@@ -300,7 +301,8 @@ public final class Lucene95HnswVectorsReader extends KnnVectorsReader implements
             fieldEntry.vectorDataLength,
             vectorData);
     RandomVectorScorer scorer =
-        RandomVectorScorer.createFloats(vectorValues, fieldEntry.similarityFunction, target);
+        DefaultRandomVectorScorerSupplier.createScorer(
+            vectorValues, fieldEntry.similarityFunction, target);
     HnswGraphSearcher.search(
         scorer,
         new OrdinalTranslatedKnnCollector(knnCollector, vectorValues::ordToDoc),
@@ -328,7 +330,8 @@ public final class Lucene95HnswVectorsReader extends KnnVectorsReader implements
             fieldEntry.vectorDataLength,
             vectorData);
     RandomVectorScorer scorer =
-        RandomVectorScorer.createBytes(vectorValues, fieldEntry.similarityFunction, target);
+        DefaultRandomVectorScorerSupplier.createScorer(
+            vectorValues, fieldEntry.similarityFunction, target);
     HnswGraphSearcher.search(
         scorer,
         new OrdinalTranslatedKnnCollector(knnCollector, vectorValues::ordToDoc),

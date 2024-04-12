@@ -27,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.InfoStream;
+import org.apache.lucene.util.hnsw.DefaultRandomVectorScorerSupplier;
 import org.apache.lucene.util.hnsw.HnswGraph;
 import org.apache.lucene.util.hnsw.HnswGraphBuilder;
 import org.apache.lucene.util.hnsw.HnswGraphSearcher;
@@ -145,7 +146,7 @@ public final class Lucene91HnswGraphBuilder {
   /** Inserts a doc with vector value to the graph */
   void addGraphNode(int node, float[] value) throws IOException {
     RandomVectorScorer scorer =
-        RandomVectorScorer.createFloats(vectorValues, similarityFunction, value);
+        DefaultRandomVectorScorerSupplier.createScorer(vectorValues, similarityFunction, value);
     HnswGraphBuilder.GraphBuilderKnnCollector candidates;
     final int nodeLevel = getRandomGraphLevel(ml, random);
     int curMaxLevel = hnsw.numLevels() - 1;

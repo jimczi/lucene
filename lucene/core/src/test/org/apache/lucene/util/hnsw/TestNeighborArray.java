@@ -18,6 +18,7 @@
 package org.apache.lucene.util.hnsw;
 
 import java.io.IOException;
+import java.util.function.IntToDoubleFunction;
 import org.apache.lucene.tests.util.LuceneTestCase;
 import org.apache.lucene.util.Bits;
 
@@ -191,7 +192,7 @@ public class TestNeighborArray extends LuceneTestCase {
     neighbors.addOutOfOrder(7, Float.NaN);
     neighbors.addOutOfOrder(6, Float.NaN);
     neighbors.addOutOfOrder(4, Float.NaN);
-    int[] unchecked = neighbors.sort((TestRandomVectorScorer) nodeId -> 7 - nodeId + 1);
+    int[] unchecked = neighbors.sort(new TestRandomVectorScorer(nodeId -> 7 - nodeId + 1));
     assertArrayEquals(new int[] {0, 1, 2, 3, 4, 5, 6}, unchecked);
     assertNodesEqual(new int[] {1, 2, 3, 4, 5, 6, 7}, neighbors);
     assertScoresEqual(new float[] {7, 6, 5, 4, 3, 2, 1}, neighbors);
@@ -207,7 +208,7 @@ public class TestNeighborArray extends LuceneTestCase {
     neighbors.addOutOfOrder(17, Float.NaN);
     neighbors.addOutOfOrder(16, Float.NaN);
     neighbors.addOutOfOrder(14, Float.NaN);
-    int[] unchecked = neighbors.sort((TestRandomVectorScorer) nodeId -> 7 - nodeId + 11);
+    int[] unchecked = neighbors.sort(new TestRandomVectorScorer(nodeId -> 7 - nodeId + 11));
     assertArrayEquals(new int[] {0, 1, 2, 3, 4, 5, 6}, unchecked);
     assertNodesEqual(new int[] {11, 12, 13, 14, 15, 16, 17}, neighbors);
     assertScoresEqual(new float[] {7, 6, 5, 4, 3, 2, 1}, neighbors);
@@ -225,19 +226,41 @@ public class TestNeighborArray extends LuceneTestCase {
     }
   }
 
-  interface TestRandomVectorScorer extends RandomVectorScorer {
+  class TestRandomVectorScorer extends RandomVectorScorer {
+    private final IntToDoubleFunction scoreFunction;
+
+    public TestRandomVectorScorer(IntToDoubleFunction scoreFunction) {
+      super(null);
+      this.scoreFunction = scoreFunction;
+    }
+
     @Override
-    default int maxOrd() {
+    public float score(int node) throws IOException {
+      return (float) scoreFunction.applyAsDouble(node);
+    }
+
+    @Override
+    public int maxOrd() {
       throw new UnsupportedOperationException();
     }
 
     @Override
-    default int ordToDoc(int ord) {
+    public int ordToDoc(int ord) {
       throw new UnsupportedOperationException();
     }
 
     @Override
-    default Bits getAcceptOrds(Bits acceptDocs) {
+    public Bits getAcceptOrds(Bits acceptDocs) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public RandomVectorScorer setQueryOrd(int ord) throws IOException {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public RandomVectorScorer copy() throws IOException {
       throw new UnsupportedOperationException();
     }
   }
