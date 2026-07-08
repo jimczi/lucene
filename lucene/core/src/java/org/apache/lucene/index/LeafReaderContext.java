@@ -24,8 +24,13 @@ public final class LeafReaderContext extends IndexReaderContext {
   /** The reader's ord in the top-level's leaves array */
   public final int ord;
 
-  /** The reader's absolute doc base */
-  public final int docBase;
+  /**
+   * The reader's absolute doc base: the global doc id of this leaf's first document within the
+   * top-level composite reader. This is a {@code long} because a composite/directory reader may span
+   * more than {@link Integer#MAX_VALUE} documents across its segments, even though each segment
+   * (leaf) is itself limited to {@link Integer#MAX_VALUE} documents.
+   */
+  public final long docBase;
 
   private final LeafReader reader;
   private final List<LeafReaderContext> leaves;
@@ -35,9 +40,9 @@ public final class LeafReaderContext extends IndexReaderContext {
       CompositeReaderContext parent,
       LeafReader reader,
       int ord,
-      int docBase,
+      long docBase,
       int leafOrd,
-      int leafDocBase) {
+      long leafDocBase) {
     super(parent, ord, docBase);
     this.ord = leafOrd;
     this.docBase = leafDocBase;

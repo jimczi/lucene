@@ -27,7 +27,7 @@ import org.apache.lucene.search.ScoreDoc;
  */
 public final class ReaderUtil {
 
-  private static final int[] EMPTY_INT_ARRAY = new int[0];
+  private static final long[] EMPTY_LONG_ARRAY = new long[0];
 
   private ReaderUtil() {} // no instance
 
@@ -40,6 +40,26 @@ public final class ReaderUtil {
       context = context.parent;
     }
     return context;
+  }
+
+  /**
+   * Fails fast if a composite helper that addresses the whole doc space through int-based APIs (e.g.
+   * {@code Bits}, {@code DocIdSetIterator}) is used on an index with more than {@link
+   * Integer#MAX_VALUE} documents; such an index must be consumed per-leaf.
+   *
+   * @param totalDocCount the composite reader's {@link IndexReader#totalMaxDoc()}
+   * @param feature short description of the helper, for the error message
+   */
+  static void ensureIntDocIdSpace(long totalDocCount, String feature) {
+    if (totalDocCount > Integer.MAX_VALUE) {
+      throw new UnsupportedOperationException(
+          feature
+              + " is not supported for an index with more than "
+              + Integer.MAX_VALUE
+              + " documents (has "
+              + totalDocCount
+              + "); consume the index per-leaf instead");
+    }
   }
 
   /**
@@ -70,16 +90,43 @@ public final class ReaderUtil {
 
   /**
    * Returns index of the searcher/reader for document <code>n</code> in the array used to construct
+   * this searcher/reader. This variant supports a {@code long} doc-id space, as used by a composite
+   * reader whose segments together hold more than {@link Integer#MAX_VALUE} documents.
+   */
+  public static int subIndex(long n, long[] docStarts) {
+    // find searcher/reader for doc n:
+    int size = docStarts.length;
+    int lo = 0; // search starts array
+    int hi = size - 1; // for first element less than n, return its index
+    while (hi >= lo) {
+      int mid = (lo + hi) >>> 1;
+      long midValue = docStarts[mid];
+      if (n < midValue) {
+        hi = mid - 1;
+      } else if (n > midValue) {
+        lo = mid + 1;
+      } else { // found a match
+        while (mid + 1 < size && docStarts[mid + 1] == midValue) {
+          mid++; // scan to last match
+        }
+        return mid;
+      }
+    }
+    return hi;
+  }
+
+  /**
+   * Returns index of the searcher/reader for document <code>n</code> in the array used to construct
    * this searcher/reader.
    */
-  public static int subIndex(int n, List<LeafReaderContext> leaves) {
+  public static int subIndex(long n, List<LeafReaderContext> leaves) {
     // find searcher/reader for doc n:
     int size = leaves.size();
     int lo = 0; // search starts array
     int hi = size - 1; // for first element less than n, return its index
     while (hi >= lo) {
       int mid = (lo + hi) >>> 1;
-      int midValue = leaves.get(mid).docBase;
+      long midValue = leaves.get(mid).docBase;
       if (n < midValue) {
         hi = mid - 1;
       } else if (n > midValue) {
@@ -102,14 +149,14 @@ public final class ReaderUtil {
    * @param leaves the index reader's leaves
    * @return array indexed by leaf ord, containing global doc IDs for that leaf (empty if no hits)
    */
-  public static int[][] partitionByLeaf(ScoreDoc[] hits, List<LeafReaderContext> leaves) {
+  public static long[][] partitionByLeaf(ScoreDoc[] hits, List<LeafReaderContext> leaves) {
     int numLeaves = leaves.size();
-    int[][] result = new int[numLeaves][];
+    long[][] result = new long[numLeaves][];
     if (hits.length == 0) {
-      Arrays.fill(result, EMPTY_INT_ARRAY);
+      Arrays.fill(result, EMPTY_LONG_ARRAY);
       return result;
     }
-    int[] sortedDocIds = new int[hits.length];
+    long[] sortedDocIds = new long[hits.length];
     for (int i = 0; i < hits.length; i++) {
       sortedDocIds[i] = hits[i].doc;
     }
@@ -118,9 +165,9 @@ public final class ReaderUtil {
     int leafIdx = 0;
     for (; leafIdx < numLeaves && from < sortedDocIds.length; leafIdx++) {
       LeafReaderContext leaf = leaves.get(leafIdx);
-      int leafEnd = leaf.docBase + leaf.reader().maxDoc();
+      long leafEnd = leaf.docBase + leaf.reader().maxDoc();
       if (sortedDocIds[from] >= leafEnd) {
-        result[leafIdx] = EMPTY_INT_ARRAY;
+        result[leafIdx] = EMPTY_LONG_ARRAY;
         continue;
       }
       int to = Arrays.binarySearch(sortedDocIds, from, sortedDocIds.length, leafEnd);
@@ -129,11 +176,11 @@ public final class ReaderUtil {
       }
       int count = to - from;
       assert count > 0;
-      result[leafIdx] = new int[count];
+      result[leafIdx] = new long[count];
       System.arraycopy(sortedDocIds, from, result[leafIdx], 0, count);
       from = to;
     }
-    Arrays.fill(result, leafIdx, numLeaves, EMPTY_INT_ARRAY);
+    Arrays.fill(result, leafIdx, numLeaves, EMPTY_LONG_ARRAY);
     return result;
   }
 }
