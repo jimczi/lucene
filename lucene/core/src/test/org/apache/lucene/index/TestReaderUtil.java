@@ -35,9 +35,9 @@ public class TestReaderUtil extends LuceneTestCase {
       writer.addDocument(new Document());
       try (DirectoryReader reader = DirectoryReader.open(writer)) {
         List<LeafReaderContext> leaves = reader.leaves();
-        int[][] result = ReaderUtil.partitionByLeaf(new ScoreDoc[0], leaves);
+        long[][] result = ReaderUtil.partitionByLeaf(new ScoreDoc[0], leaves);
         assertEquals(leaves.size(), result.length);
-        for (int[] leaf : result) {
+        for (long[] leaf : result) {
           assertEquals(0, leaf.length);
         }
       }
@@ -57,10 +57,10 @@ public class TestReaderUtil extends LuceneTestCase {
         ScoreDoc[] hits = {
           new ScoreDoc(0, 1f), new ScoreDoc(3, 1f), new ScoreDoc(5, 1f), new ScoreDoc(9, 1f)
         };
-        int[][] result = ReaderUtil.partitionByLeaf(hits, leaves);
+        long[][] result = ReaderUtil.partitionByLeaf(hits, leaves);
 
         assertEquals(1, result.length);
-        assertArrayEquals(new int[] {0, 3, 5, 9}, result[0]);
+        assertArrayEquals(new long[] {0, 3, 5, 9}, result[0]);
       }
     }
   }
@@ -88,13 +88,13 @@ public class TestReaderUtil extends LuceneTestCase {
         ScoreDoc[] hits = {
           new ScoreDoc(2, 1f), new ScoreDoc(9, 1f), new ScoreDoc(10, 1f), new ScoreDoc(18, 1f)
         };
-        int[][] result = ReaderUtil.partitionByLeaf(hits, leaves);
+        long[][] result = ReaderUtil.partitionByLeaf(hits, leaves);
 
         assertEquals(2, result.length);
         // First segment: docs 0-9
-        assertArrayEquals(new int[] {2, 9}, result[0]);
+        assertArrayEquals(new long[] {2, 9}, result[0]);
         // Second segment: docs 10-19
-        assertArrayEquals(new int[] {10, 18}, result[1]);
+        assertArrayEquals(new long[] {10, 18}, result[1]);
       }
     }
   }
@@ -117,12 +117,12 @@ public class TestReaderUtil extends LuceneTestCase {
 
         // Hits only in first and third segment (skip middle)
         ScoreDoc[] hits = {new ScoreDoc(3, 1f), new ScoreDoc(25, 1f)};
-        int[][] result = ReaderUtil.partitionByLeaf(hits, leaves);
+        long[][] result = ReaderUtil.partitionByLeaf(hits, leaves);
 
         assertEquals(3, result.length);
-        assertArrayEquals(new int[] {3}, result[0]);
+        assertArrayEquals(new long[] {3}, result[0]);
         assertEquals(0, result[1].length); // middle segment has no hits
-        assertArrayEquals(new int[] {25}, result[2]);
+        assertArrayEquals(new long[] {25}, result[2]);
       }
     }
   }
@@ -164,7 +164,7 @@ public class TestReaderUtil extends LuceneTestCase {
             hits[i] = new ScoreDoc(docIds[i], 1f);
           }
 
-          int[][] result = ReaderUtil.partitionByLeaf(hits, leaves);
+          long[][] result = ReaderUtil.partitionByLeaf(hits, leaves);
 
           // Verify: result length matches leaves
           assertEquals(numSegments, result.length);
@@ -175,12 +175,12 @@ public class TestReaderUtil extends LuceneTestCase {
 
           // Verify: each doc in correct leaf and sorted
           for (int leafIdx = 0; leafIdx < result.length; leafIdx++) {
-            int[] leafDocs = result[leafIdx];
+            long[] leafDocs = result[leafIdx];
             LeafReaderContext leaf = leaves.get(leafIdx);
-            int docBase = leaf.docBase;
+            int docBase = Math.toIntExact(leaf.docBase);
             int maxDoc = leaf.reader().maxDoc();
             for (int i = 0; i < leafDocs.length; i++) {
-              int docId = leafDocs[i];
+              long docId = leafDocs[i];
               assertTrue(docId >= docBase && docId < docBase + maxDoc);
               if (i > 0) {
                 assertTrue(leafDocs[i] > leafDocs[i - 1]);
