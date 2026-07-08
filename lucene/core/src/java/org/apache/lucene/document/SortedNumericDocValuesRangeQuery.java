@@ -103,7 +103,7 @@ final class SortedNumericDocValuesRangeQuery extends NumericDocValuesRangeQuery 
       }
       if (lowerValue <= stats.min()
           && upperValue >= stats.max()
-          && stats.docCount() == indexSearcher.getIndexReader().maxDoc()) {
+          && stats.docCount() == indexSearcher.getIndexReader().totalMaxDoc()) {
         return MatchAllDocsQuery.INSTANCE;
       }
     }
