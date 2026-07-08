@@ -160,11 +160,11 @@
  *   TermGroupSelector grouper = new TermGroupSelector(groupField);
  *   AllGroupHeadsCollector c = AllGroupHeadsCollector.newCollector(grouper, sortWithinGroup);
  *   s.search(new TermQuery(new Term("content", searchTerm)), c);
- *   // Return all group heads as int array
- *   int[] groupHeadsArray = c.retrieveGroupHeads()
- *   // Return all group heads as FixedBitSet.
- *   int maxDoc = s.maxDoc();
- *   FixedBitSet groupHeadsBitSet = c.retrieveGroupHeads(maxDoc)
+ *   // Return all group head global doc ids as a long array
+ *   long[] groupHeadsArray = c.retrieveGroupHeads()
+ *   // Return all group heads as a LongBitSet.
+ *   long maxDoc = s.getIndexReader().totalMaxDoc();
+ *   LongBitSet groupHeadsBitSet = c.retrieveGroupHeads(maxDoc)
  * </code></pre>
  */
 package org.apache.lucene.search.grouping;

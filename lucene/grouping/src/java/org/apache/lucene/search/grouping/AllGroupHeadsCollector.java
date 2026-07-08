@@ -21,7 +21,9 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.lucene.index.IndexReader;
+import java.util.List;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.ReaderUtil;
 import org.apache.lucene.search.FieldComparator;
 import org.apache.lucene.search.LeafFieldComparator;
 import org.apache.lucene.search.Pruning;
@@ -80,27 +82,33 @@ public abstract class AllGroupHeadsCollector<T> extends SimpleCollector {
   }
 
   /**
-   * @param maxDoc The maxDoc of the top level {@link IndexReader}.
-   * @return a {@link FixedBitSet} containing all group heads.
+   * @param leaves the leaf contexts of the top-level {@link IndexReader} that was searched
+   * @return one {@link FixedBitSet} per leaf (indexed by {@link LeafReaderContext#ord}), each
+   *     marking that leaf's group heads by their leaf-local doc id. Splitting the heads per segment
+   *     keeps every bit set within the int-addressable per-segment doc space, so this works even
+   *     when the whole index holds more than {@link Integer#MAX_VALUE} documents.
    */
-  public FixedBitSet retrieveGroupHeads(int maxDoc) {
-    FixedBitSet bitSet = new FixedBitSet(maxDoc);
-
-    Collection<? extends GroupHead<T>> groupHeads = getCollectedGroupHeads();
-    for (GroupHead groupHead : groupHeads) {
-      bitSet.set(groupHead.doc);
+  public FixedBitSet[] retrieveGroupHeads(List<LeafReaderContext> leaves) {
+    FixedBitSet[] bitSets = new FixedBitSet[leaves.size()];
+    for (LeafReaderContext ctx : leaves) {
+      bitSets[ctx.ord] = new FixedBitSet(ctx.reader().maxDoc());
     }
 
-    return bitSet;
+    for (GroupHead groupHead : getCollectedGroupHeads()) {
+      int ord = ReaderUtil.subIndex(groupHead.doc, leaves);
+      bitSets[ord].set((int) (groupHead.doc - leaves.get(ord).docBase));
+    }
+
+    return bitSets;
   }
 
   /**
-   * @return an int array containing all group heads. The size of the array is equal to number of
-   *     collected unique groups.
+   * @return an array containing all group head global doc ids. The size of the array is equal to
+   *     number of collected unique groups.
    */
-  public int[] retrieveGroupHeads() {
+  public long[] retrieveGroupHeads() {
     Collection<? extends GroupHead<T>> groupHeads = getCollectedGroupHeads();
-    int[] docHeads = new int[groupHeads.size()];
+    long[] docHeads = new long[groupHeads.size()];
 
     int i = 0;
     for (GroupHead groupHead : groupHeads) {
@@ -194,12 +202,12 @@ public abstract class AllGroupHeadsCollector<T> extends SimpleCollector {
   public abstract static class GroupHead<T> {
 
     public final T groupValue;
-    public int doc;
+    public long doc;
 
-    protected int docBase;
+    protected long docBase;
 
     /** Create a new GroupHead for the given value */
-    protected GroupHead(T groupValue, int doc, int docBase) {
+    protected GroupHead(T groupValue, int doc, long docBase) {
       this.groupValue = groupValue;
       this.doc = doc + docBase;
       this.docBase = docBase;
@@ -348,7 +356,7 @@ public abstract class AllGroupHeadsCollector<T> extends SimpleCollector {
     private float topScore;
     private final Object[] sortValues;
 
-    protected ScoringGroupHead(Scorable scorer, T groupValue, int doc, int docBase)
+    protected ScoringGroupHead(Scorable scorer, T groupValue, int doc, long docBase)
         throws IOException {
       super(groupValue, doc, docBase);
       this.scorer = scorer;
