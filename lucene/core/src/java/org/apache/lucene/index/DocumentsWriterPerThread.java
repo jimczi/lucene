@@ -142,6 +142,13 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
   private final int indexMajorVersionCreated;
   private final boolean hasParentField;
 
+  /**
+   * The partition (e.g. tenant/slice) this DWPT is dedicated to, or null when partitioning is off.
+   * Set once by {@link DocumentsWriterPerThreadPool} at creation; a DWPT never mixes partitions, so
+   * its flushed segment contains a single partition.
+   */
+  Object partitionKey;
+
   DocumentsWriterPerThread(
       int indexMajorVersionCreated,
       String segmentName,
@@ -444,6 +451,11 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
     assert numDocsInRAM > 0;
     assert deleteSlice.isEmpty() : "all deletes must be applied in prepareFlush";
     segmentInfo.setMaxDoc(numDocsInRAM);
+    if (partitionKey != null) {
+      // Record which partition (tenant/slice) this segment belongs to so a slice-aware merge policy
+      // can keep merges within a single partition and preserve one-segment-per-partition.
+      segmentInfo.putAttribute(DocumentPartitioner.PARTITION_ATTRIBUTE, partitionKey.toString());
+    }
     final SegmentWriteState flushState =
         new SegmentWriteState(
             infoStream,

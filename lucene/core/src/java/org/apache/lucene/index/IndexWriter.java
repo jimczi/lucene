@@ -403,6 +403,15 @@ public class IndexWriter
   private final ReaderPool readerPool;
   private final BufferedUpdatesStream bufferedUpdatesStream;
 
+  /**
+   * Segments detached from the live commit via {@link #detachPartition}, keyed by partition. Their
+   * files are pinned in the {@link #deleter} so they survive checkpoints while absent from {@link
+   * #segmentInfos}; {@link #attachPartition} re-inserts them. This is what lets the writer hold only
+   * the <em>active</em> partitions' segments in memory while idle partitions' segments stay durable
+   * on disk (in stateless, in the object store) — the manifest is the durable record of all of them.
+   */
+  private final Map<Object, List<SegmentCommitInfo>> detachedPartitions = new HashMap<>();
+
   private final IndexWriterEventListener eventListener;
 
   /**
@@ -2085,8 +2094,12 @@ public class IndexWriter
     return globalFieldNumberMap.getFieldNames();
   }
 
-  // for test purpose
-  final synchronized int getSegmentCount() {
+  /**
+   * The number of segments in the live commit (resident {@link SegmentInfos}). With partition eviction
+   * ({@link #detachPartition}) this stays O(#active partitions) rather than O(#total) — the property a
+   * scaling benchmark measures.
+   */
+  public final synchronized int getSegmentCount() {
     return segmentInfos.size();
   }
 
@@ -3709,6 +3722,95 @@ public class IndexWriter
     } finally {
       maybeCloseOnTragicEvent();
     }
+  }
+
+  /**
+   * Flushes the in-memory buffer(s) for a single partition (e.g. a tenant/slice as assigned by {@link
+   * IndexWriterConfig#setDocumentPartitioner}), producing one or more segments that contain only that
+   * partition, without flushing other partitions. This lets a caller evict a specific partition from
+   * memory (e.g. an idle tenant) on demand. Returns {@code true} if a segment was written.
+   *
+   * @lucene.experimental
+   */
+  public final boolean flushSlice(Object partitionKey) throws IOException {
+    try {
+      if (docWriter.flushPartition(partitionKey)) {
+        processEvents(true);
+        return true; // we wrote a segment
+      }
+      return false;
+    } catch (Error tragedy) {
+      tragicEvent(tragedy, "flushSlice");
+      throw tragedy;
+    } finally {
+      maybeCloseOnTragicEvent();
+    }
+  }
+
+  /**
+   * Detaches every segment belonging to {@code partitionKey} (as stamped by {@link
+   * DocumentPartitioner#PARTITION_ATTRIBUTE}) from the live commit: the segments are removed from the
+   * in-memory {@link SegmentInfos} so a {@link DirectoryReader} no longer sees them and they stop
+   * consuming the writer's resident segment state, while their files are pinned against deletion so a
+   * later {@link #attachPartition} can restore them. Segments currently participating in a merge are
+   * skipped (flush and let merges quiesce for an idle partition before detaching). Returns the number
+   * of segments detached.
+   *
+   * <p>The caller is responsible for durably recording the detached segments (in stateless: the
+   * partitioned manifest, which already lists every partition's segments) so they can be attached
+   * again — either into this writer or, after a restart, into a fresh one.
+   *
+   * @return the segments that were detached (empty if the partition had none in the live commit); the
+   *     caller can record their {@code info.name}/{@code info.maxDoc()} in a durable catalog.
+   * @lucene.experimental
+   */
+  public final synchronized List<SegmentCommitInfo> detachPartition(Object partitionKey)
+      throws IOException {
+    ensureOpen();
+    final List<SegmentCommitInfo> toDetach = new ArrayList<>();
+    for (SegmentCommitInfo sci : segmentInfos.asList()) {
+      if (partitionKey.equals(sci.info.getAttribute(DocumentPartitioner.PARTITION_ATTRIBUTE))
+          && mergingSegments.contains(sci) == false) {
+        toDetach.add(sci);
+      }
+    }
+    if (toDetach.isEmpty()) {
+      return List.of();
+    }
+    for (SegmentCommitInfo sci : toDetach) {
+      deleter.incRef(sci.files()); // pin so the checkpoint below (and future ones) keep the files
+      readerPool.drop(sci); // release any pooled reader; the segment leaves the live commit
+      segmentInfos.remove(sci);
+      // The docs leave the live index but are not deleted; keep pendingNumDocs == segmentInfos.totalMaxDoc.
+      adjustPendingNumDocs(-sci.info.maxDoc());
+    }
+    detachedPartitions.computeIfAbsent(partitionKey, k -> new ArrayList<>()).addAll(toDetach);
+    checkpoint(); // deleter reconciles against the smaller SegmentInfos; pinned files survive
+    return List.copyOf(toDetach);
+  }
+
+  /**
+   * Re-inserts segments previously removed by {@link #detachPartition} for {@code partitionKey} back
+   * into the live commit and releases their file pins. Returns the number of segments re-attached (0
+   * if the partition was not detached here).
+   *
+   * @lucene.experimental
+   */
+  public final synchronized int attachPartition(Object partitionKey) throws IOException {
+    ensureOpen();
+    final List<SegmentCommitInfo> toAttach = detachedPartitions.remove(partitionKey);
+    if (toAttach == null || toAttach.isEmpty()) {
+      return 0;
+    }
+    for (SegmentCommitInfo sci : toAttach) {
+      segmentInfos.add(sci);
+      adjustPendingNumDocs(sci.info.maxDoc()); // docs re-enter the live index
+    }
+    checkpoint(); // now referenced by the live commit again
+    for (SegmentCommitInfo sci : toAttach) {
+      deleter.decRef(sci.files()); // drop the detach-time pin; the commit holds the reference now
+    }
+    return toAttach.size();
   }
 
   private long prepareCommitInternal() throws IOException {

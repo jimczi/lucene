@@ -409,13 +409,57 @@ final class DocumentsWriter implements Closeable, Accountable {
     return hasEvents;
   }
 
+  /**
+   * Flushes every buffered DWPT belonging to {@code partitionKey}, producing one or more segments that
+   * contain only that partition. Returns true if anything was flushed. Backs {@code IndexWriter#flushSlice}
+   * and the {@link LiveIndexWriterConfig#getMaxActivePartitions()} eviction policy.
+   */
+  boolean flushPartition(Object partitionKey) throws IOException {
+    boolean flushed = false;
+    DocumentsWriterPerThread dwpt;
+    while ((dwpt = flushControl.checkoutPartitionWriter(partitionKey)) != null) {
+      doFlush(dwpt);
+      flushed = true;
+    }
+    return flushed;
+  }
+
+  /**
+   * When partitioning is bounded, flushes the least-recently-used partition once the number of buffered
+   * partitions exceeds {@link LiveIndexWriterConfig#getMaxActivePartitions()}.
+   */
+  private void maybeEvictPartition() throws IOException {
+    final int maxActive = config.getMaxActivePartitions();
+    if (maxActive > 0) {
+      final Object victim = perThreadPool.evictionCandidate(maxActive);
+      if (victim != null) {
+        flushPartition(victim);
+      }
+    }
+  }
+
+  /**
+   * Derives the partition key for a document block from the configured {@link DocumentPartitioner},
+   * or null when partitioning is off. The whole block (parent + children) shares the first doc's key.
+   */
+  private Object partitionKeyOf(Iterable<? extends Iterable<? extends IndexableField>> docs) {
+    final DocumentPartitioner partitioner = config.getDocumentPartitioner();
+    if (partitioner == null) {
+      return null;
+    }
+    for (Iterable<? extends IndexableField> doc : docs) {
+      return partitioner.partitionKey(doc);
+    }
+    return null;
+  }
+
   long updateDocuments(
       final Iterable<? extends Iterable<? extends IndexableField>> docs,
       final DocumentsWriterDeleteQueue.Node<?> delNode)
       throws IOException {
     boolean hasEvents = preUpdate();
 
-    final DocumentsWriterPerThread dwpt = flushControl.obtainAndLock();
+    final DocumentsWriterPerThread dwpt = flushControl.obtainAndLock(partitionKeyOf(docs));
     final DocumentsWriterPerThread flushingDWPT;
     long seqNo;
 
@@ -450,6 +494,7 @@ final class DocumentsWriter implements Closeable, Accountable {
     if (postUpdate(flushingDWPT, hasEvents)) {
       seqNo = -seqNo;
     }
+    maybeEvictPartition();
     return seqNo;
   }
 
@@ -487,6 +532,7 @@ final class DocumentsWriter implements Closeable, Accountable {
     if (postUpdate(flushingDWPT, hasEvents)) {
       seqNo = -seqNo;
     }
+    maybeEvictPartition();
     return seqNo;
   }
 

@@ -699,6 +699,45 @@ public final class SegmentInfos implements Cloneable, Iterable<SegmentCommitInfo
     CodecUtil.writeFooter(out);
   }
 
+  /**
+   * Writes this {@code SegmentInfos} to a caller-named file (not a {@code segments_N}), stamping it with
+   * {@code generation}. Companion to {@link #readFromFile}. This is for persisting a <em>side commit</em>
+   * that lists a chosen subset of segments — e.g. the segments of a single partition (tenant/slice) that
+   * have been {@link IndexWriter#detachPartition detached} from the main commit — so the subset can be
+   * reconstructed later (after a restart) independently of the directory's {@code segments_N}. The named
+   * file lives outside the {@code segments_N} generation namespace, so it neither advances nor is seen by
+   * the normal commit machinery; the caller owns its lifecycle.
+   *
+   * @lucene.experimental
+   */
+  public void writeToFile(Directory directory, String fileName, long generation) throws IOException {
+    this.generation = generation;
+    boolean success = false;
+    try (IndexOutput out = directory.createOutput(fileName, IOContext.DEFAULT)) {
+      write(out);
+      success = true;
+    } finally {
+      if (success == false) {
+        IOUtils.deleteFilesIgnoringExceptions(directory, fileName);
+      }
+    }
+    directory.sync(Collections.singleton(fileName));
+  }
+
+  /**
+   * Reads a {@code SegmentInfos} previously written by {@link #writeToFile} with the same {@code
+   * generation}, reconstructing the full {@link SegmentCommitInfo}s (id, codec, delGen, files) so they can
+   * be opened with {@link PartitionReaders#openSegments}.
+   *
+   * @lucene.experimental
+   */
+  public static SegmentInfos readFromFile(Directory directory, String fileName, long generation)
+      throws IOException {
+    try (ChecksumIndexInput in = directory.openChecksumInput(fileName)) {
+      return readCommit(directory, in, generation);
+    }
+  }
+
   /** Returns a copy of this instance, also copying each SegmentInfo. */
   @Override
   public SegmentInfos clone() {

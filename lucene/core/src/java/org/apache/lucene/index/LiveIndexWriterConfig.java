@@ -66,6 +66,15 @@ public class LiveIndexWriterConfig {
   /** {@link Codec} used to write new segments. */
   protected volatile Codec codec;
 
+  /** Optional partitioner routing documents to per-partition indexing buffers; null = unpartitioned. */
+  protected volatile DocumentPartitioner documentPartitioner;
+
+  /**
+   * Maximum number of partitions that may hold buffered documents at once; when exceeded, the
+   * least-recently-used partition's buffer is flushed. 0 (the default) disables the bound.
+   */
+  protected volatile int maxActivePartitions;
+
   /** {@link InfoStream} for debugging messages. */
   protected volatile InfoStream infoStream;
 
@@ -464,6 +473,16 @@ public class LiveIndexWriterConfig {
   /** Returns the parent document field name if configured. */
   public String getParentField() {
     return parentField;
+  }
+
+  /** Returns the {@link DocumentPartitioner} routing docs to per-partition buffers, or null. */
+  public DocumentPartitioner getDocumentPartitioner() {
+    return documentPartitioner;
+  }
+
+  /** Returns the maximum number of partitions allowed to buffer at once (0 = unbounded). */
+  public int getMaxActivePartitions() {
+    return maxActivePartitions;
   }
 
   @Override

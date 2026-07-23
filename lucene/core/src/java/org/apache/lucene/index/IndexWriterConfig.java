@@ -561,4 +561,32 @@ public final class IndexWriterConfig extends LiveIndexWriterConfig {
     this.parentField = parentField;
     return this;
   }
+
+  /**
+   * Sets a {@link DocumentPartitioner} so that documents are buffered per partition key and flushed
+   * into segments containing a single partition (e.g. one tenant/slice per segment). Default is null
+   * (unpartitioned), preserving the standard per-thread buffering behavior.
+   *
+   * @lucene.experimental
+   */
+  public IndexWriterConfig setDocumentPartitioner(DocumentPartitioner documentPartitioner) {
+    this.documentPartitioner = documentPartitioner;
+    return this;
+  }
+
+  /**
+   * Bounds the number of partitions ({@link DocumentPartitioner} keys) that may buffer documents at
+   * once. When a new partition would exceed this bound, the least-recently-used partition's buffer is
+   * flushed to a segment, keeping the in-memory working set bounded even with very many partitions.
+   * 0 (the default) disables the bound.
+   *
+   * @lucene.experimental
+   */
+  public IndexWriterConfig setMaxActivePartitions(int maxActivePartitions) {
+    if (maxActivePartitions < 0) {
+      throw new IllegalArgumentException("maxActivePartitions must be >= 0, got " + maxActivePartitions);
+    }
+    this.maxActivePartitions = maxActivePartitions;
+    return this;
+  }
 }

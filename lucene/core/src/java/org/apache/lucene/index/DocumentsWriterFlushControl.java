@@ -524,8 +524,12 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
   }
 
   DocumentsWriterPerThread obtainAndLock() {
+    return obtainAndLock(null);
+  }
+
+  DocumentsWriterPerThread obtainAndLock(Object partitionKey) {
     while (closed == false) {
-      final DocumentsWriterPerThread perThread = perThreadPool.getAndLock();
+      final DocumentsWriterPerThread perThread = perThreadPool.getAndLock(partitionKey);
       if (perThread.deleteQueue == documentsWriter.deleteQueue) {
         // simply return the DWPT even in a flush all case since we already hold the lock and the
         // DWPT is not stale
@@ -744,6 +748,43 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
   /** Returns the {@link IndexWriter} {@link InfoStream} */
   public InfoStream getInfoStream() {
     return infoStream;
+  }
+
+  /**
+   * Checks out (marking flush-pending) a single buffered DWPT belonging to {@code partitionKey}, or
+   * null if that partition has no more buffered DWPTs. Mirrors {@link #checkoutLargestNonPendingWriter}
+   * but selects by partition instead of by RAM.
+   */
+  final DocumentsWriterPerThread checkoutPartitionWriter(Object partitionKey) {
+    DocumentsWriterPerThread writer = findPartitionWriter(partitionKey);
+    if (writer != null) {
+      writer.lock();
+      try {
+        if (perThreadPool.isRegistered(writer)) {
+          synchronized (this) {
+            try {
+              return checkout(writer, writer.isFlushPending() == false);
+            } finally {
+              updateStallState();
+            }
+          }
+        }
+      } finally {
+        writer.unlock();
+      }
+    }
+    return null;
+  }
+
+  private synchronized DocumentsWriterPerThread findPartitionWriter(Object partitionKey) {
+    for (DocumentsWriterPerThread next : perThreadPool) {
+      if (next.isFlushPending() == false
+          && next.getNumDocsInRAM() > 0
+          && java.util.Objects.equals(next.partitionKey, partitionKey)) {
+        return next;
+      }
+    }
+    return null;
   }
 
   synchronized DocumentsWriterPerThread findLargestNonPendingWriter() {

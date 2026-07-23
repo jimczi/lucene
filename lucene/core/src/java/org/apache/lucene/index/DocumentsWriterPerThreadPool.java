@@ -19,10 +19,14 @@ package org.apache.lucene.index;
 import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.apache.lucene.store.AlreadyClosedException;
@@ -44,8 +48,22 @@ final class DocumentsWriterPerThreadPool implements Iterable<DocumentsWriterPerT
 
   private final Set<DocumentsWriterPerThread> dwpts =
       Collections.newSetFromMap(new IdentityHashMap<>());
-  private final LockableConcurrentApproximatePriorityQueue<DocumentsWriterPerThread> freeList =
-      new LockableConcurrentApproximatePriorityQueue<>();
+
+  /** Sentinel standing in for the {@code null} (default/unpartitioned) key in {@link #freeListByKey}. */
+  private static final Object NULL_KEY = new Object();
+
+  /**
+   * Free (idle) DWPTs available for reuse, grouped by partition key. A DWPT is only ever reused for
+   * the partition it already holds, so it never mixes partitions. With no partitioner every DWPT has
+   * the {@code null} key, giving a single free list identical to the previous behavior.
+   */
+  private final Map<Object, LockableConcurrentApproximatePriorityQueue<DocumentsWriterPerThread>>
+      freeListByKey = new ConcurrentHashMap<>();
+
+  /** Monotonic access clock and per-partition last-access stamp, used to pick an LRU eviction victim. */
+  private final AtomicLong partitionAccessClock = new AtomicLong();
+  private final Map<Object, Long> partitionLastAccess = new ConcurrentHashMap<>();
+
   private final Supplier<DocumentsWriterPerThread> dwptFactory;
   private int takenWriterPermits = 0;
   private volatile boolean closed;
@@ -82,7 +100,14 @@ final class DocumentsWriterPerThreadPool implements Iterable<DocumentsWriterPerT
    *
    * @return a new {@link DocumentsWriterPerThread}
    */
-  private synchronized DocumentsWriterPerThread newWriter() {
+  private LockableConcurrentApproximatePriorityQueue<DocumentsWriterPerThread> freeListFor(
+      Object partitionKey) {
+    return freeListByKey.computeIfAbsent(
+        partitionKey == null ? NULL_KEY : partitionKey,
+        k -> new LockableConcurrentApproximatePriorityQueue<>());
+  }
+
+  private synchronized DocumentsWriterPerThread newWriter(Object partitionKey) {
     assert takenWriterPermits >= 0;
     while (takenWriterPermits > 0) {
       // we can't create new DWPTs while not all permits are available
@@ -100,6 +125,7 @@ final class DocumentsWriterPerThreadPool implements Iterable<DocumentsWriterPerT
     // pool is closed
     ensureOpen();
     DocumentsWriterPerThread dwpt = dwptFactory.get();
+    dwpt.partitionKey = partitionKey; // sticky: this DWPT only ever buffers this partition
     dwpt.lock(); // lock so nobody else will get this DWPT
     dwpts.add(dwpt);
     return dwpt;
@@ -113,17 +139,28 @@ final class DocumentsWriterPerThreadPool implements Iterable<DocumentsWriterPerT
    * operation (add/updateDocument).
    */
   DocumentsWriterPerThread getAndLock() {
+    return getAndLock(null);
+  }
+
+  /**
+   * Obtains a locked DWPT dedicated to {@code partitionKey}. Only an idle DWPT already holding the
+   * same key is reused; otherwise a fresh, key-stamped DWPT is created. This guarantees a DWPT never
+   * mixes partitions, so its flushed segment holds a single partition.
+   */
+  DocumentsWriterPerThread getAndLock(Object partitionKey) {
     ensureOpen();
-    DocumentsWriterPerThread dwpt = freeList.lockAndPoll();
+    partitionLastAccess.put(
+        partitionKey == null ? NULL_KEY : partitionKey, partitionAccessClock.incrementAndGet());
+    DocumentsWriterPerThread dwpt = freeListFor(partitionKey).lockAndPoll();
     if (dwpt != null) {
       return dwpt;
     }
 
     // newWriter() adds the DWPT to the `dwpts` set as a side-effect. However it is not added to
-    // `freeList` at this point, it will be added later on once DocumentsWriter has indexed a
-    // document into this DWPT and then gives it back to the pool by calling
+    // the partition's free list at this point, it will be added later on once DocumentsWriter has
+    // indexed a document into this DWPT and then gives it back to the pool by calling
     // #marksAsFreeAndUnlock.
-    return newWriter();
+    return newWriter(partitionKey);
   }
 
   private void ensureOpen() {
@@ -149,7 +186,7 @@ final class DocumentsWriterPerThreadPool implements Iterable<DocumentsWriterPerT
             + state.isQueueAdvanced();
     assert contains(state)
         : "we tried to add a DWPT back to the pool but the pool doesn't know about this DWPT";
-    freeList.addAndUnlock(state, ramBytesUsed);
+    freeListFor(state.partitionKey).addAndUnlock(state, ramBytesUsed);
   }
 
   @Override
@@ -192,9 +229,9 @@ final class DocumentsWriterPerThreadPool implements Iterable<DocumentsWriterPerT
     // check if the DWPT is available.
     assert perThread.isHeldByCurrentThread();
     if (dwpts.remove(perThread)) {
-      freeList.remove(perThread);
+      freeListFor(perThread.partitionKey).remove(perThread);
     } else {
-      assert freeList.contains(perThread) == false;
+      assert freeListFor(perThread.partitionKey).contains(perThread) == false;
       return false;
     }
     return true;
@@ -203,6 +240,37 @@ final class DocumentsWriterPerThreadPool implements Iterable<DocumentsWriterPerT
   /** Returns <code>true</code> if this DWPT is still part of the pool */
   synchronized boolean isRegistered(DocumentsWriterPerThread perThread) {
     return dwpts.contains(perThread);
+  }
+
+  /**
+   * If more than {@code maxActivePartitions} partitions currently hold buffered documents, returns the
+   * key of the least-recently-used such partition (to be flushed), otherwise {@code null}. The default
+   * ({@code null}/unpartitioned) partition is never selected.
+   */
+  synchronized Object evictionCandidate(int maxActivePartitions) {
+    if (maxActivePartitions <= 0) {
+      return null;
+    }
+    final Map<Object, Long> oldestAccessByPartition = new HashMap<>();
+    for (DocumentsWriterPerThread dwpt : dwpts) {
+      if (dwpt.getNumDocsInRAM() > 0) {
+        final Object key = dwpt.partitionKey == null ? NULL_KEY : dwpt.partitionKey;
+        final long access = partitionLastAccess.getOrDefault(key, 0L);
+        oldestAccessByPartition.merge(key, access, Math::min);
+      }
+    }
+    if (oldestAccessByPartition.size() <= maxActivePartitions) {
+      return null;
+    }
+    Object victim = null;
+    long oldest = Long.MAX_VALUE;
+    for (Map.Entry<Object, Long> e : oldestAccessByPartition.entrySet()) {
+      if (e.getKey() != NULL_KEY && e.getValue() < oldest) {
+        oldest = e.getValue();
+        victim = e.getKey();
+      }
+    }
+    return victim;
   }
 
   @Override
