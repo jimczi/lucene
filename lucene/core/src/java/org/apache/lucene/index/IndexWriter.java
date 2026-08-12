@@ -5331,8 +5331,14 @@ public class IndexWriter
           });
 
       // Resolved only now, so the policy can place boundaries on real key values
-      // by inspecting the merge readers rather than guessing from doc counts.
-      final int[][] partitions = merge.getDocRangePartitions();
+      // from the actual readers rather than guessing from doc counts. They are
+      // passed in rather than read back off the merge, so that a wrapping merge
+      // can delegate this method.
+      final List<CodecReader> rawReaders = new ArrayList<>();
+      for (MergePolicy.MergeReader mr : merge.getMergeReader()) {
+        rawReaders.add(mr.reader);
+      }
+      final int[][] partitions = merge.getDocRangePartitions(rawReaders);
       if (partitions == null) {
         throw new IllegalStateException(
             "OneMerge.isPartitioned() returned true but getDocRangePartitions() returned null");

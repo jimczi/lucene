@@ -359,7 +359,7 @@ public abstract class MergePolicy {
      *
      * @lucene.experimental
      */
-    public int[][] getDocRangePartitions() throws IOException {
+    public int[][] getDocRangePartitions(List<CodecReader> readers) throws IOException {
       return null;
     }
 
@@ -373,7 +373,7 @@ public abstract class MergePolicy {
       return false;
     }
 
-    /** Set by IndexWriter once {@link #getDocRangePartitions()} has been resolved. */
+    /** Set by IndexWriter once {@link #getDocRangePartitions(List)} has been resolved. */
     int outputCount = 1;
 
     /** Number of segments this merge produces; 1 unless it is partitioned. */
@@ -556,28 +556,50 @@ public abstract class MergePolicy {
       }
     }
 
-    /**
-     * The readers this merge will consume, available only once {@link IndexWriter} has opened them
-     * -- which is why {@link #getDocRangePartitions()} is resolved at that point. Intended for
-     * partitioning implementations that need to place boundaries on real key values rather than on
-     * doc counts. Returns an empty list before the readers are opened.
-     *
-     * @lucene.experimental
-     */
-    public List<CodecReader> getMergeReaders() {
-      if (mergeReaders == null) {
-        return List.of();
-      }
-      List<CodecReader> readers = new ArrayList<>(mergeReaders.size());
-      for (MergeReader mr : mergeReaders) {
-        readers.add(mr.reader);
-      }
-      return readers;
-    }
-
-    /** Returns the merge readers or an empty list if the readers were not initialized yet. */
     List<MergeReader> getMergeReader() {
       return mergeReaders;
+    }
+  }
+
+  /**
+   * A {@link OneMerge} that forwards every behavioural method to another merge.
+   *
+   * <p>Wrapping a merge by hand is error-prone: a wrapper that forgets to forward {@link
+   * OneMerge#isPartitioned()} and {@link OneMerge#getDocRangePartitions(List)} silently turns a
+   * partitioned merge back into a single-output one. Extend this instead of {@link OneMerge} when
+   * wrapping, and new behaviour is inherited automatically.
+   *
+   * @lucene.experimental
+   */
+  public static class FilterOneMerge extends OneMerge {
+    /** The merge being wrapped. */
+    protected final OneMerge in;
+
+    /** Wrap {@code in}. */
+    public FilterOneMerge(OneMerge in) {
+      super(in.segments);
+      this.in = in;
+    }
+
+    @Override
+    public boolean isPartitioned() {
+      return in.isPartitioned();
+    }
+
+    @Override
+    public int[][] getDocRangePartitions(List<CodecReader> readers) throws IOException {
+      return in.getDocRangePartitions(readers);
+    }
+
+    @Override
+    public CodecReader wrapForMerge(CodecReader reader) throws IOException {
+      return in.wrapForMerge(reader);
+    }
+
+    @Override
+    public Sorter.DocMap reorder(CodecReader reader, Directory dir, Executor executor)
+        throws IOException {
+      return in.reorder(reader, dir, executor);
     }
   }
 

@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.NumericDocValuesField;
@@ -35,7 +36,9 @@ import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.tests.store.MockDirectoryWrapper;
 import org.apache.lucene.tests.util.LuceneTestCase;
+import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.BytesRef;
 
@@ -329,6 +332,202 @@ public class TestMultiOutputMerge extends LuceneTestCase {
     }
   }
 
+  /**
+   * An IOException while writing one of the outputs must leave the index exactly as it was: a
+   * partitioned merge is all-or-nothing, like any other merge.
+   */
+  public void testIOExceptionWritingAnOutput() throws Exception {
+    try (Directory dir = newDirectory()) {
+      Set<String> committed = new HashSet<>();
+      IndexWriterConfig iwc = config();
+      iwc.setMergeScheduler(new SerialMergeScheduler());
+      IndexWriter w = new IndexWriter(dir, iwc);
+      for (int seg = 0; seg < SEGMENTS; seg++) {
+        for (int d = 0; d < PER_SEGMENT; d++) {
+          w.addDocument(doc(id(seg, d), 0));
+          committed.add(id(seg, d));
+        }
+        w.flush();
+      }
+      w.commit();
+
+      AtomicBoolean fired = new AtomicBoolean();
+      if (dir instanceof MockDirectoryWrapper mock) {
+        // Fail once, partway through writing the partitioned outputs.
+        mock.failOn(
+            new MockDirectoryWrapper.Failure() {
+              @Override
+              public void eval(MockDirectoryWrapper d) throws IOException {
+                if (fired.get()) {
+                  return;
+                }
+                for (StackTraceElement e : Thread.currentThread().getStackTrace()) {
+                  if ("multiOutputMergeMiddle".equals(e.getMethodName())) {
+                    fired.set(true);
+                    throw new IOException("injected while writing a partitioned output");
+                  }
+                }
+              }
+            });
+      }
+
+      enabled = true;
+      proceed.countDown();
+      try {
+        w.maybeMerge();
+      } catch (Throwable expected) {
+        // the injected failure may surface here
+      }
+      if (dir instanceof MockDirectoryWrapper) {
+        assertTrue("the failure must actually have been injected", fired.get());
+      }
+      // The injected Failure disables itself after firing once.
+      try {
+        w.rollback();
+      } catch (Throwable ignored) {
+        // writer may already be tragically closed by the injected failure
+      }
+
+      // Whatever happened, the committed index must still be intact and valid.
+      TestUtil.checkIndex(dir);
+      try (DirectoryReader r = DirectoryReader.open(dir)) {
+        List<String> live = liveIds(r);
+        assertEquals("no document may be duplicated", live.size(), new HashSet<>(live).size());
+        assertEquals(committed, new HashSet<>(live));
+      }
+    }
+  }
+
+  /** rollback() while a partitioned merge is in flight must revert to the last commit. */
+  public void testRollbackDuringPartitionedMerge() throws Exception {
+    try (Directory dir = newDirectory()) {
+      Set<String> committed = new HashSet<>();
+      IndexWriter w = new IndexWriter(dir, config());
+      for (int seg = 0; seg < SEGMENTS; seg++) {
+        for (int d = 0; d < PER_SEGMENT; d++) {
+          w.addDocument(doc(id(seg, d), 0));
+          committed.add(id(seg, d));
+        }
+        w.flush();
+      }
+      w.commit();
+
+      Thread roller =
+          new Thread(
+              () -> {
+                try {
+                  mergeStarted.await();
+                  // Release the merge first: rollback() waits for in-flight
+                  // merges, so holding it parked here would deadlock.
+                  proceed.countDown();
+                  w.rollback();
+                } catch (Throwable ignored) {
+                  // rollback races the merge; either ordering is acceptable
+                }
+              });
+      roller.start();
+      enabled = true;
+      try {
+        w.maybeMerge();
+      } catch (Throwable ignored) {
+        // may surface the abort
+      }
+      roller.join();
+      try {
+        w.close();
+      } catch (Throwable ignored) {
+      }
+
+      TestUtil.checkIndex(dir);
+      try (DirectoryReader r = DirectoryReader.open(dir)) {
+        List<String> live = liveIds(r);
+        assertEquals("no document may be duplicated", live.size(), new HashSet<>(live).size());
+        assertEquals("rollback must restore the committed state", committed, new HashSet<>(live));
+      }
+    }
+  }
+
+  /** A wrapper that drops the partitioning must fail loudly, not silently make one segment. */
+  public void testWrappingMustPreservePartitioning() throws Exception {
+    try (Directory dir = newDirectory()) {
+      IndexWriterConfig iwc = config();
+      iwc.setMergeScheduler(new SerialMergeScheduler());
+      iwc.setMergePolicy(
+          new OneMergeWrappingMergePolicy(
+              new PartitioningMergePolicy(),
+              toWrap ->
+                  // Deliberately forgets to forward isPartitioned().
+                  new MergePolicy.OneMerge(toWrap.segments) {
+                    @Override
+                    public CodecReader wrapForMerge(CodecReader reader) throws IOException {
+                      return toWrap.wrapForMerge(reader);
+                    }
+                  }));
+      Throwable caught = null;
+      try (IndexWriter w = new IndexWriter(dir, iwc)) {
+        for (int seg = 0; seg < 2; seg++) {
+          for (int d = 0; d < 20; d++) {
+            w.addDocument(doc(id(seg, d), 0));
+          }
+          w.flush();
+        }
+        w.commit();
+        enabled = true;
+        proceed.countDown();
+        try {
+          w.maybeMerge();
+        } catch (Throwable t) {
+          caught = t;
+        }
+        w.rollback();
+      } catch (Throwable t) {
+        if (caught == null) {
+          caught = t;
+        }
+      }
+      assertNotNull("dropping the partitioning must be reported", caught);
+      boolean sawIse = false;
+      for (Throwable t = caught; t != null; t = t.getCause()) {
+        if (t instanceof IllegalStateException
+            && t.getMessage() != null
+            && t.getMessage().contains("dropped the partitioning")) {
+          sawIse = true;
+          break;
+        }
+      }
+      assertTrue("expected the wrapping check to fire, got " + caught, sawIse);
+    }
+  }
+
+  /** FilterOneMerge forwards partitioning, so wrapping through it still produces k outputs. */
+  public void testFilterOneMergePreservesPartitioning() throws Exception {
+    try (Directory dir = newDirectory()) {
+      IndexWriterConfig iwc = config();
+      iwc.setMergePolicy(
+          new OneMergeWrappingMergePolicy(
+              new PartitioningMergePolicy(), MergePolicy.FilterOneMerge::new));
+      Set<String> expected = new HashSet<>();
+      try (IndexWriter w = new IndexWriter(dir, iwc)) {
+        for (int seg = 0; seg < SEGMENTS; seg++) {
+          for (int d = 0; d < PER_SEGMENT; d++) {
+            w.addDocument(doc(id(seg, d), 0));
+            expected.add(id(seg, d));
+          }
+          w.flush();
+        }
+        w.commit();
+        enabled = true;
+        proceed.countDown();
+        w.maybeMerge();
+      }
+      try (DirectoryReader r = DirectoryReader.open(dir)) {
+        assertTrue(
+            "wrapping through FilterOneMerge must keep several outputs", r.leaves().size() > 1);
+        assertEquals(expected, new HashSet<>(liveIds(r)));
+      }
+    }
+  }
+
   // ------------------------------------------------------------------
 
   private class PartitioningMergePolicy extends MergePolicy {
@@ -402,7 +601,7 @@ public class TestMultiOutputMerge extends LuceneTestCase {
     }
 
     @Override
-    public int[][] getDocRangePartitions() {
+    public int[][] getDocRangePartitions(List<CodecReader> readers) {
       return parts;
     }
 

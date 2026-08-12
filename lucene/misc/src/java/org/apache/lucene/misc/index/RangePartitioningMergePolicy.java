@@ -34,7 +34,7 @@ import org.apache.lucene.util.BytesRefBuilder;
 
 /**
  * Rewrites segments so that each output owns a contiguous range of the index sort key, using {@link
- * MergePolicy.OneMerge#getDocRangePartitions()}.
+ * MergePolicy.OneMerge#getDocRangePartitions(java.util.List)}.
  *
  * <p>Without this, every segment holds an arbitrary subset of keys, so a query restricted to one
  * key must open nearly every segment. Merging cannot fix that by <em>selection</em> -- merging any
@@ -121,8 +121,7 @@ public class RangePartitioningMergePolicy extends FilterMergePolicy {
     }
 
     @Override
-    public int[][] getDocRangePartitions() throws IOException {
-      final List<CodecReader> readers = getMergeReaders();
+    public int[][] getDocRangePartitions(List<CodecReader> readers) throws IOException {
 
       // ord -> first docID, one linear pass per reader. A key occupies one
       // contiguous docID interval because the index is sorted by `field`.
