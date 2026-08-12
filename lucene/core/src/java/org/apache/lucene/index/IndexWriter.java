@@ -4429,6 +4429,20 @@ public class IndexWriter
    */
   private synchronized ReadersAndUpdates commitMergedDeletesAndUpdates(
       MergePolicy.OneMerge merge, MergeState.DocMap[] docMaps) throws IOException {
+    return commitMergedDeletesAndUpdates(merge, merge.info, docMaps);
+  }
+
+  /**
+   * Carry deletes and doc-values updates that arrived while merging into {@code target}.
+   *
+   * <p>For a partitioned merge this is called once per output with that output's doc maps.
+   * Documents belonging to another output map to {@code -1}, and {@link #carryOverHardDeletes}
+   * already skips those, so each concurrently-arriving delete lands on exactly the one output that
+   * owns the document.
+   */
+  private synchronized ReadersAndUpdates commitMergedDeletesAndUpdates(
+      MergePolicy.OneMerge merge, SegmentCommitInfo target, MergeState.DocMap[] docMaps)
+      throws IOException {
 
     mergeFinishedGen.incrementAndGet();
 
@@ -4445,7 +4459,7 @@ public class IndexWriter
     long minGen = Long.MAX_VALUE;
 
     // Lazy init (only when we find a delete or update to carry over):
-    final ReadersAndUpdates mergedDeletesAndUpdates = getPooledInstance(merge.info, true);
+    final ReadersAndUpdates mergedDeletesAndUpdates = getPooledInstance(target, true);
     int numDeletesBefore = mergedDeletesAndUpdates.getDelCount();
     // field -> delGen -> dv field updates
     Map<String, LongObjectHashMap<DocValuesFieldUpdates>> mappedDVUpdates = new HashMap<>();
@@ -4502,12 +4516,12 @@ public class IndexWriter
               case NUMERIC:
                 mappedUpdates =
                     new NumericDocValuesFieldUpdates(
-                        updates.delGen, updates.field, merge.info.info.maxDoc());
+                        updates.delGen, updates.field, target.info.maxDoc());
                 break;
               case BINARY:
                 mappedUpdates =
                     new BinaryDocValuesFieldUpdates(
-                        updates.delGen, updates.field, merge.info.info.maxDoc());
+                        updates.delGen, updates.field, target.info.maxDoc());
                 break;
               case NONE:
               case SORTED:
@@ -4557,7 +4571,7 @@ public class IndexWriter
       infoStream.message("IW", msg);
     }
 
-    merge.info.setBufferedDeletesGen(minGen);
+    target.setBufferedDeletesGen(minGen);
 
     return mergedDeletesAndUpdates;
   }
@@ -4848,15 +4862,19 @@ public class IndexWriter
       throw t;
     }
 
-    if (merge.info != null && merge.isAborted() == false) {
-      if (infoStream.isEnabled("IW")) {
-        infoStream.message("IW", "merged new segment " + merge.info.toStringVerbose());
+    if (merge.isAborted() == false && infoStream.isEnabled("IW")) {
+      // A partitioned merge populates getMergeInfos() rather than merge.info.
+      for (SegmentCommitInfo info : merge.getMergeInfos()) {
+        if (info == null) {
+          continue;
+        }
+        infoStream.message("IW", "merged new segment " + info.toStringVerbose());
         infoStream.message(
             "IW",
             "merge time "
                 + (System.currentTimeMillis() - t0)
                 + " ms for "
-                + merge.info.info.maxDoc()
+                + info.info.maxDoc()
                 + " docs");
       }
     }
@@ -5075,11 +5093,17 @@ public class IndexWriter
     details.put("mergeMaxNumSegments", "" + merge.maxNumSegments);
     details.put("mergeFactor", Integer.toString(merge.segments.size()));
     setDiagnostics(si, SOURCE_MERGE, details);
-    merge.setMergeInfo(new SegmentCommitInfo(si, 0, 0, -1L, -1L, -1L, StringHelper.randomId()));
+    if (merge.isPartitioned() == false) {
+      merge.setMergeInfo(new SegmentCommitInfo(si, 0, 0, -1L, -1L, -1L, StringHelper.randomId()));
+    }
 
     if (infoStream.isEnabled("IW")) {
       infoStream.message(
-          "IW", "merge seg=" + merge.info.info.name + " " + segString(merge.segments));
+          "IW",
+          "merge seg="
+              + (merge.info == null ? "(partitioned)" : merge.info.info.name)
+              + " "
+              + segString(merge.segments));
     }
   }
 
@@ -5197,11 +5221,332 @@ public class IndexWriter
     return true;
   }
 
+  /** Fresh {@link SegmentCommitInfo} for one output of a merge. */
+  private SegmentCommitInfo newMergeSegmentInfo(MergePolicy.OneMerge merge) {
+    boolean hasBlocks = false;
+    for (SegmentCommitInfo info : merge.segments) {
+      if (info.info.getHasBlocks()) {
+        hasBlocks = true;
+        break;
+      }
+    }
+    SegmentInfo si =
+        new SegmentInfo(
+            directoryOrig,
+            Version.LATEST,
+            null,
+            newSegmentName(),
+            -1,
+            false,
+            hasBlocks,
+            config.getCodec(),
+            Collections.emptyMap(),
+            StringHelper.randomId(),
+            Collections.emptyMap(),
+            config.getIndexSort());
+    Map<String, String> details = new HashMap<>();
+    details.put("mergeMaxNumSegments", "" + merge.maxNumSegments);
+    details.put("mergeFactor", Integer.toString(merge.segments.size()));
+    details.put("mergeOutputs", Integer.toString(merge.getOutputCount()));
+    setDiagnostics(si, SOURCE_MERGE, details);
+    return new SegmentCommitInfo(si, 0, 0, -1L, -1L, -1L, StringHelper.randomId());
+  }
+
+  /**
+   * Validate a doc-range partition spec. Only the SHAPE is checked -- one boundary array per input,
+   * all the same length, non-decreasing, starting at 0 and ending at that input's maxDoc. Given
+   * that shape, the two properties the merge depends on, disjointness and full coverage, hold by
+   * construction rather than by trusting the caller.
+   */
+  private void validateDocRangePartitions(MergePolicy.OneMerge merge, int[][] partitions) {
+    if (config.getIndexSort() == null) {
+      throw new IllegalArgumentException(
+          "a partitioned merge requires an index sort: a contiguous doc range is a contiguous key "
+              + "range only when segments are sorted");
+    }
+    if (partitions.length != merge.segments.size()) {
+      throw new IllegalArgumentException(
+          "docRangePartitions has "
+              + partitions.length
+              + " entries but the merge has "
+              + merge.segments.size()
+              + " input segments");
+    }
+    final int outputs = merge.getOutputCount();
+    if (outputs < 1) {
+      throw new IllegalArgumentException("a partitioned merge must have at least one output");
+    }
+    for (int i = 0; i < partitions.length; i++) {
+      final int[] b = partitions[i];
+      final int maxDoc = merge.segments.get(i).info.maxDoc();
+      if (b.length != outputs + 1) {
+        throw new IllegalArgumentException(
+            "docRangePartitions[" + i + "] has length " + b.length + ", expected " + (outputs + 1));
+      }
+      if (b[0] != 0 || b[outputs] != maxDoc) {
+        throw new IllegalArgumentException(
+            "docRangePartitions["
+                + i
+                + "] must span [0, "
+                + maxDoc
+                + "], got ["
+                + b[0]
+                + ", "
+                + b[outputs]
+                + "]");
+      }
+      for (int o = 1; o <= outputs; o++) {
+        if (b[o] < b[o - 1]) {
+          throw new IllegalArgumentException(
+              "docRangePartitions[" + i + "] is not non-decreasing at " + o);
+        }
+      }
+    }
+  }
+
+  /**
+   * Merge producing several output segments, each holding a contiguous doc range of every input.
+   * Kept separate from {@link #mergeMiddle} so the single-output path stays untouched.
+   */
+  private int multiOutputMergeMiddle(MergePolicy.OneMerge merge, MergePolicy mergePolicy)
+      throws IOException {
+    testPoint("mergeMiddleStart");
+    merge.checkAborted();
+
+    final Directory mergeDirectory = mergeScheduler.wrapForMerge(merge, directory);
+    final IOContext context = IOContext.merge(merge.getStoreMergeInfo());
+    final Codec codec = config.getCodec();
+
+    boolean success = false;
+    int totalDocs = 0;
+    try {
+      merge.initMergeReaders(
+          sci -> {
+            final ReadersAndUpdates rld = getPooledInstance(sci, true);
+            rld.setIsMerging();
+            synchronized (this) {
+              return rld.getReaderForMerge(
+                  context, mr -> deleter.incRef(mr.reader.getSegmentInfo().files()));
+            }
+          });
+
+      // Resolved only now, so the policy can place boundaries on real key values
+      // by inspecting the merge readers rather than guessing from doc counts.
+      final int[][] partitions = merge.getDocRangePartitions();
+      if (partitions == null) {
+        throw new IllegalStateException(
+            "OneMerge.isPartitioned() returned true but getDocRangePartitions() returned null");
+      }
+      merge.outputCount = partitions[0].length - 1;
+      validateDocRangePartitions(merge, partitions);
+      final int outputCount = merge.getOutputCount();
+
+      if (infoStream.isEnabled("IW")) {
+        infoStream.message(
+            "IW", "merging " + segString(merge.segments) + " into " + outputCount + " outputs");
+      }
+
+      final Executor intraMergeExecutor = mergeScheduler.getIntraMergeExecutor(merge);
+      final List<MergeState.DocMap[]> docMapsPerOutput = new ArrayList<>(outputCount);
+      merge.mergeStartNS = System.nanoTime();
+
+      for (int output = 0; output < outputCount; output++) {
+        merge.checkAborted();
+        final TrackingDirectoryWrapper dirWrapper = new TrackingDirectoryWrapper(mergeDirectory);
+        final SegmentCommitInfo outInfo = newMergeSegmentInfo(merge);
+        merge.setMergeInfo(output, outInfo);
+
+        final List<CodecReader> mergeReaders = new ArrayList<>();
+        final Counter softDeleteCount = Counter.newCounter(false);
+        int i = 0;
+        for (MergePolicy.MergeReader mergeReader : merge.getMergeReader()) {
+          CodecReader wrapped = merge.wrapForMerge(mergeReader.reader);
+          validateMergeReader(wrapped);
+          // Everything outside this output's range looks deleted, so it maps to -1 in the
+          // resulting DocMap -- which is what routes concurrent deletes to the right output.
+          wrapped =
+              new DocRangeCodecReader(wrapped, partitions[i][output], partitions[i][output + 1]);
+          if (softDeletesEnabled) {
+            // Count soft deletes that fall INSIDE this output's range. The
+            // single-output shortcut (softDelCount - numDeletedDocs) cannot be
+            // used here: numDeletedDocs on a range-restricted reader also counts
+            // every document belonging to the other outputs. hardLiveDocs may be
+            // null and countSoftDeletes handles that.
+            Counter hardDeleteCounter = Counter.newCounter(false);
+            countSoftDeletes(
+                wrapped,
+                wrapped.getLiveDocs(),
+                mergeReader.hardLiveDocs,
+                softDeleteCount,
+                hardDeleteCounter);
+          }
+          mergeReaders.add(wrapped);
+          i++;
+        }
+
+        final SegmentMerger merger =
+            new SegmentMerger(
+                mergeReaders,
+                outInfo.info,
+                infoStream,
+                dirWrapper,
+                globalFieldNumberMap,
+                context,
+                intraMergeExecutor,
+                merge);
+        final MergeState.DocMap[] docMaps = merger.mergeState.docMaps;
+        try {
+          outInfo.setSoftDelCount(Math.toIntExact(softDeleteCount.get()));
+          merge.checkAborted();
+          if (merger.shouldMerge()) {
+            merger.merge();
+          }
+        } finally {
+          merger.cleanupMerge();
+        }
+        docMapsPerOutput.add(docMaps);
+        outInfo.info.setFiles(new HashSet<>(dirWrapper.getCreatedFiles()));
+
+        if (merger.shouldMerge() == false) {
+          continue; // this output is empty; commit will drop it
+        }
+        totalDocs += outInfo.info.maxDoc();
+
+        boolean useCompoundFile;
+        synchronized (this) {
+          useCompoundFile =
+              outInfo
+                  .info
+                  .getCodec()
+                  .compoundFormat()
+                  .useCompoundFile(mergePolicy.size(outInfo, this), mergePolicy);
+        }
+        if (useCompoundFile) {
+          final Collection<String> filesToRemove = outInfo.files();
+          final TrackingDirectoryWrapper trackingCFSDir = new TrackingDirectoryWrapper(directory);
+          try {
+            createCompoundFile(
+                infoStream, trackingCFSDir, outInfo.info, context, this::deleteNewFiles);
+          } catch (Throwable t) {
+            synchronized (this) {
+              if (merge.isAborted() == false) {
+                handleMergeException(t, merge);
+              }
+            }
+            deleteNewFiles(outInfo.files());
+            return 0;
+          }
+          synchronized (this) {
+            deleteNewFiles(filesToRemove);
+            if (merge.isAborted()) {
+              deleteNewFiles(outInfo.files());
+              return 0;
+            }
+          }
+          outInfo.info.setUseCompoundFile(true);
+        }
+
+        try {
+          codec.segmentInfoFormat().write(directory, outInfo.info, context);
+        } catch (Throwable t) {
+          deleteNewFiles(outInfo.files());
+          throw t;
+        }
+      }
+
+      if (commitMultiMerge(merge, docMapsPerOutput) == false) {
+        return 0;
+      }
+      success = true;
+    } finally {
+      if (success == false) {
+        closeMergeReaders(merge, true, false);
+      }
+    }
+    return totalDocs;
+  }
+
+  /** {@link #commitMerge} for a partitioned merge: swap N inputs for the surviving k outputs. */
+  private synchronized boolean commitMultiMerge(
+      MergePolicy.OneMerge merge, List<MergeState.DocMap[]> docMapsPerOutput) throws IOException {
+    merge.onMergeComplete();
+    testPoint("startCommitMerge");
+
+    if (tragedy.get() != null) {
+      throw new IllegalStateException(
+          "this writer hit an unrecoverable error; cannot complete merge", tragedy.get());
+    }
+    assert merge.registerDone;
+
+    if (merge.isAborted()) {
+      if (infoStream.isEnabled("IW")) {
+        infoStream.message("IW", "commitMultiMerge: skip: it was aborted");
+      }
+      for (SegmentCommitInfo info : merge.getMergeInfos()) {
+        if (info != null) {
+          readerPool.drop(info);
+          deleteNewFiles(info.files());
+        }
+      }
+      return false;
+    }
+
+    final List<SegmentCommitInfo> survivors = new ArrayList<>();
+    int keptDocs = 0;
+    for (int output = 0; output < merge.getOutputCount(); output++) {
+      final SegmentCommitInfo info = merge.getMergeInfos().get(output);
+      assert segmentInfos.contains(info) == false;
+      final ReadersAndUpdates updates =
+          info.info.maxDoc() == 0
+              ? null
+              : commitMergedDeletesAndUpdates(merge, info, docMapsPerOutput.get(output));
+      final boolean drop = info.info.maxDoc() == 0 || (updates != null && isFullyDeleted(updates));
+      if (updates != null) {
+        try {
+          if (drop) {
+            updates.dropChanges();
+          }
+          release(updates, false);
+        } catch (Throwable t) {
+          updates.dropChanges();
+          readerPool.drop(info);
+          throw t;
+        }
+      }
+      if (drop) {
+        readerPool.drop(info);
+        deleteNewFiles(info.files());
+      } else {
+        survivors.add(info);
+        keptDocs += info.info.maxDoc();
+      }
+    }
+
+    segmentInfos.applyMergeChanges(merge, survivors);
+
+    final int delDocCount = merge.totalMaxDoc - keptDocs;
+    assert delDocCount >= 0 : "totalMaxDoc=" + merge.totalMaxDoc + " kept=" + keptDocs;
+    adjustPendingNumDocs(-delDocCount);
+
+    try (Closeable _ = this::checkpoint) {
+      closeMergeReaders(merge, false, survivors.isEmpty());
+    }
+
+    if (infoStream.isEnabled("IW")) {
+      infoStream.message(
+          "IW", "after commitMultiMerge: " + survivors.size() + " outputs kept; " + segString());
+    }
+    return true;
+  }
+
   /**
    * Does the actual (time-consuming) work of the merge, but without holding synchronized lock on
    * IndexWriter instance
    */
   private int mergeMiddle(MergePolicy.OneMerge merge, MergePolicy mergePolicy) throws IOException {
+    if (merge.isPartitioned()) {
+      return multiOutputMergeMiddle(merge, mergePolicy);
+    }
     testPoint("mergeMiddleStart");
     merge.checkAborted();
 

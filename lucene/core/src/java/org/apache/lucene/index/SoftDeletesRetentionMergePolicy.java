@@ -61,6 +61,16 @@ public final class SoftDeletesRetentionMergePolicy extends OneMergeWrappingMerge
         toWrap ->
             new MergePolicy.OneMerge(toWrap.segments) {
               @Override
+              public boolean isPartitioned() {
+                return toWrap.isPartitioned();
+              }
+
+              @Override
+              public int[][] getDocRangePartitions() throws IOException {
+                return toWrap.getDocRangePartitions();
+              }
+
+              @Override
               public CodecReader wrapForMerge(CodecReader reader) throws IOException {
                 CodecReader wrapped = toWrap.wrapForMerge(reader);
                 Bits liveDocs = reader.getLiveDocs();

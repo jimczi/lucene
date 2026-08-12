@@ -18,6 +18,7 @@ package org.apache.lucene.index;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
@@ -190,7 +191,10 @@ public abstract class MergePolicy {
    */
   public static class OneMerge {
     private final CompletableFuture<Boolean> mergeCompleted = new CompletableFuture<>();
-    SegmentCommitInfo info; // used by IndexWriter
+    SegmentCommitInfo info; // used by IndexWriter; the sole output of a normal merge
+    // Non-null only for a partitioned merge (getDocRangePartitions() != null), in
+    // which case it holds one SegmentCommitInfo per output. `info` stays null.
+    List<SegmentCommitInfo> infos; // used by IndexWriter
     boolean registerDone; // used by IndexWriter
     long mergeGen; // used by IndexWriter
     boolean isExternal; // used by IndexWriter
@@ -328,11 +332,83 @@ public abstract class MergePolicy {
     }
 
     /**
+     * Expert: split this merge into several output segments, each holding a contiguous doc range of
+     * every input.
+     *
+     * <p>Returns {@code null} (the default) for the usual behaviour of producing exactly one
+     * segment. Called once, <b>after</b> merge readers have been opened, so an implementation may
+     * inspect {@link #getMergeReader()} to place boundaries on real key values rather than on doc
+     * counts. Otherwise the returned array has one entry per input segment, in the order of {@link
+     * #segments}. Each entry is a non-decreasing array of {@code outputCount + 1} boundaries
+     * starting at {@code 0} and ending at that input's {@code maxDoc}: output {@code o} takes docs
+     * {@code [b[o], b[o+1])} from that input.
+     *
+     * <p>Expressing the split as boundaries rather than arbitrary doc sets makes the two properties
+     * {@link IndexWriter} depends on structural rather than a caller obligation: the outputs are
+     * <b>disjoint</b> and together <b>cover every document</b>. {@link IndexWriter} validates the
+     * shape and rejects the merge otherwise.
+     *
+     * <p><b>Wrapping policies must delegate this method and {@link #isPartitioned()}.</b> A wrapper
+     * such as {@link OneMergeWrappingMergePolicy} that re-wraps the {@link OneMerge} without
+     * forwarding them silently downgrades the merge to a single output -- no error, just no
+     * partitioning.
+     *
+     * <p>Requires an index sort. Because every input is sorted by the same key, a contiguous doc
+     * range is a contiguous key range, so each output is itself correctly sorted and no output
+     * needs re-sorting.
+     *
+     * @lucene.experimental
+     */
+    public int[][] getDocRangePartitions() throws IOException {
+      return null;
+    }
+
+    /**
+     * Whether this merge produces several segments. Must be cheap: {@link IndexWriter} calls it to
+     * pick a code path, before merge readers exist.
+     *
+     * @lucene.experimental
+     */
+    public boolean isPartitioned() {
+      return false;
+    }
+
+    /** Set by IndexWriter once {@link #getDocRangePartitions()} has been resolved. */
+    int outputCount = 1;
+
+    /** Number of segments this merge produces; 1 unless it is partitioned. */
+    public final int getOutputCount() {
+      return outputCount;
+    }
+
+    /**
      * Expert: Sets the {@link SegmentCommitInfo} of the merged segment. Allows sub-classes to e.g.
      * {@link SegmentInfo#addDiagnostics(Map) add diagnostic} properties.
      */
     public void setMergeInfo(SegmentCommitInfo info) {
       this.info = info;
+    }
+
+    /**
+     * Expert: sets the {@link SegmentCommitInfo} of one output of a partitioned merge.
+     *
+     * @lucene.experimental
+     */
+    public void setMergeInfo(int output, SegmentCommitInfo info) {
+      if (infos == null) {
+        infos = new ArrayList<>(Collections.nCopies(outputCount, null));
+      }
+      infos.set(output, info);
+    }
+
+    /**
+     * Returns every {@link SegmentCommitInfo} this merge produced: a singleton for a normal merge,
+     * one per output for a partitioned merge. Entries may be null before the merge has run.
+     *
+     * @lucene.experimental
+     */
+    public List<SegmentCommitInfo> getMergeInfos() {
+      return infos != null ? infos : Collections.singletonList(info);
     }
 
     /**
@@ -478,6 +554,25 @@ public abstract class MergePolicy {
         // we do a copy here to ensure that mergeReaders are an immutable list
         this.mergeReaders = List.copyOf(readers);
       }
+    }
+
+    /**
+     * The readers this merge will consume, available only once {@link IndexWriter} has opened them
+     * -- which is why {@link #getDocRangePartitions()} is resolved at that point. Intended for
+     * partitioning implementations that need to place boundaries on real key values rather than on
+     * doc counts. Returns an empty list before the readers are opened.
+     *
+     * @lucene.experimental
+     */
+    public List<CodecReader> getMergeReaders() {
+      if (mergeReaders == null) {
+        return List.of();
+      }
+      List<CodecReader> readers = new ArrayList<>(mergeReaders.size());
+      for (MergeReader mr : mergeReaders) {
+        readers.add(mr.reader);
+      }
+      return readers;
     }
 
     /** Returns the merge readers or an empty list if the readers were not initialized yet. */
