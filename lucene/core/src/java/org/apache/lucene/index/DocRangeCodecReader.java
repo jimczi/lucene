@@ -38,7 +38,12 @@ final class DocRangeCodecReader extends FilterCodecReader {
     assert start >= 0 && end <= in.maxDoc() && start <= end
         : "bad range [" + start + "," + end + ") maxDoc=" + in.maxDoc();
     FixedBitSet bits = new FixedBitSet(in.maxDoc());
-    bits.set(start, end);
+    if (start < end) {
+      // An output can legitimately own no document in this reader -- a key
+      // missing here makes two cuts land on the same offset -- and
+      // FixedBitSet#set rejects an empty range starting at maxDoc.
+      bits.set(start, end);
+    }
     Bits existing = in.getLiveDocs();
     if (existing != null) {
       existing.applyMask(bits, 0);
