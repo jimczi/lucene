@@ -54,6 +54,8 @@ import java.util.stream.StreamSupport;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.FieldInfosFormat;
+import org.apache.lucene.codecs.FieldsConsumer;
+import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.column.ColumnBatch;
 import org.apache.lucene.index.DocValuesUpdate.BinaryDocValuesUpdate;
@@ -5319,6 +5321,9 @@ public class IndexWriter
 
     boolean success = false;
     int totalDocs = 0;
+    // Outlive the loop that creates them: the postings of every output are written between the
+    // phases either side of them, so each merger stays open across all three phases.
+    final List<SegmentMerger> mergers = new ArrayList<>();
     try {
       merge.initMergeReaders(
           sci -> {
@@ -5356,6 +5361,13 @@ public class IndexWriter
       final List<MergeState.DocMap[]> docMapsPerOutput = new ArrayList<>(outputCount);
       merge.mergeStartNS = System.nanoTime();
 
+      final List<SegmentCommitInfo> outInfos = new ArrayList<>(outputCount);
+      final List<TrackingDirectoryWrapper> dirWrappers = new ArrayList<>(outputCount);
+      // Where each output begins in the merged document space. A prefix sum of the output document
+      // counts, which every output knows before its postings are written.
+      final int[] outputStarts = new int[outputCount + 1];
+
+      // Phase A: every output up to, but not including, its postings.
       for (int output = 0; output < outputCount; output++) {
         merge.checkAborted();
         final TrackingDirectoryWrapper dirWrapper = new TrackingDirectoryWrapper(mergeDirectory);
@@ -5400,18 +5412,33 @@ public class IndexWriter
                 context,
                 intraMergeExecutor,
                 merge);
-        final MergeState.DocMap[] docMaps = merger.mergeState.docMaps;
-        try {
-          outInfo.setSoftDelCount(Math.toIntExact(softDeleteCount.get()));
-          merge.checkAborted();
-          if (merger.shouldMerge()) {
-            merger.merge();
-          }
-        } finally {
-          merger.cleanupMerge();
+        mergers.add(merger);
+        outInfos.add(outInfo);
+        dirWrappers.add(dirWrapper);
+        docMapsPerOutput.add(merger.mergeState.docMaps);
+        outInfo.setSoftDelCount(Math.toIntExact(softDeleteCount.get()));
+        merge.checkAborted();
+        if (merger.shouldMerge()) {
+          merger.mergeUpToPostings();
         }
-        docMapsPerOutput.add(docMaps);
-        outInfo.info.setFiles(new HashSet<>(dirWrapper.getCreatedFiles()));
+        outputStarts[output + 1] = outputStarts[output] + outInfo.info.maxDoc();
+      }
+
+      // One walk of the inputs writes the postings of every output. Doing it per output instead
+      // would read the whole terms dictionary once per output: unlike stored fields, doc values or
+      // points -- where an output's documents are a contiguous interval the reader seeks past -- a
+      // term's postings are spread across every output, so masking documents saves no IO at all.
+      mergePartitionedPostings(merge, mergers, partitions, outputStarts);
+
+      // Phase B: every output from its postings onwards, ending with its field infos.
+      for (int output = 0; output < outputCount; output++) {
+        final SegmentMerger merger = mergers.get(output);
+        final SegmentCommitInfo outInfo = outInfos.get(output);
+        merge.checkAborted();
+        if (merger.shouldMerge()) {
+          merger.mergeAfterPostings();
+        }
+        outInfo.info.setFiles(new HashSet<>(dirWrappers.get(output).getCreatedFiles()));
 
         if (merger.shouldMerge() == false) {
           continue; // this output is empty; commit will drop it
@@ -5465,11 +5492,98 @@ public class IndexWriter
       }
       success = true;
     } finally {
+      // Held open across all three phases, so they are released here rather than per output.
+      for (SegmentMerger merger : mergers) {
+        merger.cleanupMerge();
+      }
       if (success == false) {
         closeMergeReaders(merge, true, false);
       }
     }
     return totalDocs;
+  }
+
+  /**
+   * Writes the postings of every output of a partitioned merge from a single walk of the inputs.
+   *
+   * <p>This path is a precondition of a partitioned merge rather than an optimization it may fall
+   * back from: merging per output instead would read the whole terms dictionary once per output,
+   * which is the cost partitioning exists to avoid, so a codec that cannot support it is refused
+   * outright rather than served slowly and silently.
+   */
+  private void mergePartitionedPostings(
+      MergePolicy.OneMerge merge,
+      List<SegmentMerger> mergers,
+      int[][] partitions,
+      int[] outputStarts)
+      throws IOException {
+    final List<SegmentMerger> live = new ArrayList<>();
+    final List<Integer> liveOutputs = new ArrayList<>();
+    for (int output = 0; output < mergers.size(); output++) {
+      if (mergers.get(output).shouldMerge() && mergers.get(output).hasPostings()) {
+        live.add(mergers.get(output));
+        liveOutputs.add(output);
+      }
+    }
+    if (live.isEmpty()) {
+      return;
+    }
+
+    // Correctness rests on the outputs being contiguous AND in order in the merged document space.
+    // That holds under an index sort, where the merged order is key order and the outputs are key
+    // ranges. Without one, DocIDMerger concatenates input by input, so an output's documents land
+    // in one block per input rather than in a single run, and splitting a term's postings by
+    // document id would quietly hand documents to the wrong output.
+    if (live.get(0).mergeState.segmentInfo.getIndexSort() == null) {
+      throw new IllegalArgumentException(
+          "a partitioned merge requires an index sort, so that outputs are contiguous ranges of "
+              + "the merged document space");
+    }
+    for (SegmentMerger merger : live) {
+      if (merger.supportsPushWriter() == false) {
+        throw new IllegalArgumentException(
+            "postings format "
+                + merger.mergeState.segmentInfo.getCodec().postingsFormat().getName()
+                + " cannot write several outputs from one pass, so it cannot be used for a "
+                + "partitioned merge");
+      }
+    }
+
+    final int[] starts = new int[live.size() + 1];
+    for (int j = 0; j < live.size(); j++) {
+      // An output that ended up empty spans nothing, so dropping it keeps the rest tiling the
+      // merged space without gaps.
+      starts[j] = outputStarts[liveOutputs.get(j)];
+    }
+    starts[live.size()] = outputStarts[outputStarts.length - 1];
+
+    final List<MergeState> allOutputs = new ArrayList<>(mergers.size());
+    for (SegmentMerger merger : mergers) {
+      allOutputs.add(merger.mergeState);
+    }
+
+    final SegmentMerger.PostingsPass[] passes = new SegmentMerger.PostingsPass[live.size()];
+    try {
+      final FieldsConsumer[] consumers = new FieldsConsumer[live.size()];
+      final FieldInfos[] fieldInfos = new FieldInfos[live.size()];
+      final NormsProducer[] norms = new NormsProducer[live.size()];
+      for (int j = 0; j < live.size(); j++) {
+        passes[j] = live.get(j).openPostingsPass();
+        consumers[j] = passes[j].consumer;
+        // Each output's OWN field infos: a per-field dispatching format records which format wrote
+        // a field on the FieldInfo it is handed, and it is the output's own copy that is persisted.
+        fieldInfos[j] = live.get(j).mergeState.mergeFieldInfos;
+        norms[j] = passes[j].norms;
+      }
+      MultiOutputTermsMerger.merge(
+          MultiOutputTermsMerger.wholeMergedSpace(allOutputs, partitions, outputStarts),
+          consumers,
+          fieldInfos,
+          norms,
+          starts);
+    } finally {
+      IOUtils.close(passes);
+    }
   }
 
   /** {@link #commitMerge} for a partitioned merge: swap N inputs for the surviving k outputs. */
