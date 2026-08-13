@@ -35,6 +35,7 @@ import org.apache.lucene.codecs.FieldsConsumer;
 import org.apache.lucene.codecs.FieldsProducer;
 import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.codecs.PostingsFormat;
+import org.apache.lucene.codecs.TermsPushWriter;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.Fields;
 import org.apache.lucene.index.FilterLeafReader.FilterFields;
@@ -258,6 +259,62 @@ public abstract class PerFieldPostingsFormat extends PostingsFormat {
       formatToGroupBuilders.forEach(
           (postingsFormat, builder) -> formatToGroups.put(postingsFormat, builder.build()));
       return formatToGroups;
+    }
+
+    // Push-mode state. write() can group every field up front because it is handed all of them at
+    // once; push sees one field at a time, so the same grouping is built incrementally. Fields
+    // arrive in the same sorted order write() would have iterated them in, so each format is first
+    // seen at the same point and is assigned the same suffix.
+    private final Map<PostingsFormat, FieldsConsumer> pushConsumers = new HashMap<>();
+    private final Map<String, Integer> pushSuffixes = new HashMap<>();
+
+    @Override
+    public boolean supportsPushWriter() {
+      // Answer for the fields this segment actually has, by asking each field's format. Asking the
+      // format rather than a consumer is what makes this answerable at all: instantiating a
+      // consumer would create files, and the answer is needed before anything is written.
+      for (FieldInfo fieldInfo : writeState.fieldInfos) {
+        if (fieldInfo.getIndexOptions() == IndexOptions.NONE) {
+          continue;
+        }
+        PostingsFormat format = getPostingsFormatForField(fieldInfo.name);
+        if (format == null || format.supportsPushWriter() == false) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    @Override
+    public TermsPushWriter pushWriter(FieldInfo fieldInfo) throws IOException {
+      final String field = fieldInfo.name;
+      final PostingsFormat format = getPostingsFormatForField(field);
+      if (format == null) {
+        throw new IllegalStateException("invalid null PostingsFormat for field=\"" + field + "\"");
+      }
+      final String formatName = format.getName();
+
+      FieldsConsumer consumer = pushConsumers.get(format);
+      if (consumer == null) {
+        final Integer previous = pushSuffixes.get(formatName);
+        final int suffix = previous == null ? 0 : previous + 1;
+        pushSuffixes.put(formatName, suffix);
+        final String segmentSuffix =
+            getFullSegmentSuffix(
+                field, writeState.segmentSuffix, getSuffix(formatName, Integer.toString(suffix)));
+        consumer = format.fieldsConsumer(new SegmentWriteState(writeState, segmentSuffix));
+        toClose.add(consumer);
+        pushConsumers.put(format, consumer);
+      }
+
+      fieldInfo.putAttributes(
+          Map.of(
+              PER_FIELD_FORMAT_KEY,
+              formatName,
+              PER_FIELD_SUFFIX_KEY,
+              Integer.toString(pushSuffixes.get(formatName))));
+
+      return consumer.pushWriter(fieldInfo);
     }
 
     @Override

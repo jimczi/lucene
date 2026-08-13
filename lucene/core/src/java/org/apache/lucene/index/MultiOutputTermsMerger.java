@@ -105,6 +105,16 @@ final class MultiOutputTermsMerger {
       try {
         for (int o = 0; o < consumers.length; o++) {
           writers[o] = consumers[o].pushWriter(fieldInfo);
+          if (writers[o] == null) {
+            // supportsPushWriter() promised otherwise, and by now earlier fields may already be
+            // written, so there is no going back to the per-output path. A codec that mixes
+            // push-capable and push-incapable formats has to report false for the whole consumer.
+            throw new IllegalStateException(
+                "supportsPushWriter() returned true but pushWriter() returned null for field '"
+                    + fieldInfo.name
+                    + "' on "
+                    + consumers[o].getClass().getName());
+          }
         }
 
         final TermsEnum termsEnum = terms.iterator();

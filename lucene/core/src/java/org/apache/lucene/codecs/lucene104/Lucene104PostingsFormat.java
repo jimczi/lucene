@@ -407,6 +407,12 @@ public final class Lucene104PostingsFormat extends PostingsFormat {
   }
 
   @Override
+  public boolean supportsPushWriter() {
+    // Lucene103BlockTreeTermsWriter.TermsWriter is already push-shaped.
+    return true;
+  }
+
+  @Override
   public FieldsConsumer fieldsConsumer(SegmentWriteState state) throws IOException {
     PostingsWriterBase postingsWriter = new Lucene104PostingsWriter(state, version);
     try {

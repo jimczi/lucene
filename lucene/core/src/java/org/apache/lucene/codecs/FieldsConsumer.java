@@ -85,8 +85,19 @@ public abstract class FieldsConsumer implements Closeable {
 
   /**
    * Whether {@link #pushWriter} is supported. Callers must consult this <i>before</i> writing
-   * anything, since discovering the answer by calling {@code pushWriter} mid-field would leave a
-   * partially written segment behind.
+   * anything, since discovering the answer part-way through would leave a partially written segment
+   * behind.
+   *
+   * <p>Returning {@code true} is a promise that {@link #pushWriter} will not return {@code null}
+   * for any field this segment contains. A consumer that dispatches per field to other formats
+   * answers by asking each of those formats -- see {@link PostingsFormat#supportsPushWriter()},
+   * which exists on the format precisely so this can be answered without instantiating consumers.
+   *
+   * <p>The default is {@code false} rather than a working fallback because no useful fallback
+   * exists: the only thing this class can do generically is buffer every pushed term, or re-read
+   * the source once per output, which is the cost this API is meant to remove. Reporting the
+   * capability keeps that cost visible to the caller instead of hiding it behind an API that looks
+   * like a single pass.
    *
    * @lucene.experimental
    */

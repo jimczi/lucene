@@ -93,6 +93,20 @@ public abstract class PostingsFormat implements NamedSPILoader.NamedSPI {
   public abstract FieldsConsumer fieldsConsumer(SegmentWriteState state) throws IOException;
 
   /**
+   * Whether consumers from this format support {@link FieldsConsumer#pushWriter}, i.e. can be fed
+   * one term at a time so that a single walk of a source feeds several outputs.
+   *
+   * <p>This is asked of the <i>format</i> rather than of a consumer so that a dispatching format
+   * can answer for its delegates without instantiating them -- instantiating a consumer creates
+   * files.
+   *
+   * @lucene.experimental
+   */
+  public boolean supportsPushWriter() {
+    return false;
+  }
+
+  /**
    * Reads a segment. NOTE: by the time this call returns, it must hold open any files it will need
    * to use; else, those files may be deleted. Additionally, required files may be deleted during
    * the execution of this call before there is a chance to open them. Under these circumstances an
