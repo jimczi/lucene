@@ -16,6 +16,7 @@
  */
 package org.apache.lucene.index;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.Executor;
@@ -32,6 +33,7 @@ import org.apache.lucene.codecs.StoredFieldsWriter;
 import org.apache.lucene.codecs.TermVectorsWriter;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
+import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.Version;
 
@@ -51,6 +53,11 @@ final class SegmentMerger {
   final MergeState mergeState;
   private final FieldInfos.Builder fieldInfosBuilder;
   final Thread mergeStateCreationThread;
+
+  // Set by mergeUpToPostings(), and read by the phases after it.
+  private SegmentWriteState segmentWriteState;
+  private SegmentReadState segmentReadState;
+  private int numMerged;
 
   // note, just like in codec apis Directory 'dir' is NOT the same as segmentInfo.dir!!
   SegmentMerger(
@@ -114,19 +121,35 @@ final class SegmentMerger {
    * @throws IOException if there is a low-level IO error
    */
   MergeState merge() throws IOException {
+    mergeUpToPostings();
+    mergePostings();
+    return mergeAfterPostings();
+  }
+
+  /**
+   * Everything that must be written before the postings: field infos are computed, stored fields
+   * and norms are written.
+   *
+   * <p>A merge producing several outputs runs the phases either side of the postings once per
+   * output, but the postings themselves once for all of them, which is why the phases are separable
+   * at all. The order is not incidental: a per-field postings format records which format wrote
+   * each field as a {@link FieldInfo} attribute while the postings are written, and {@link
+   * #mergeAfterPostings()} persists those attributes as its last step.
+   */
+  void mergeUpToPostings() throws IOException {
     if (!shouldMerge()) {
       throw new IllegalStateException("Merge would result in 0 document segment");
     }
     mergeFieldInfos();
 
-    int numMerged = mergeWithLogging(this::mergeFields, "stored fields");
+    numMerged = mergeWithLogging(this::mergeFields, "stored fields");
     assert numMerged == mergeState.segmentInfo.maxDoc()
         : "numMerged="
             + numMerged
             + " vs mergeState.segmentInfo.maxDoc()="
             + mergeState.segmentInfo.maxDoc();
 
-    final SegmentWriteState segmentWriteState =
+    segmentWriteState =
         new SegmentWriteState(
             mergeState.infoStream,
             directory,
@@ -134,7 +157,7 @@ final class SegmentMerger {
             mergeState.mergeFieldInfos,
             null,
             context);
-    final SegmentReadState segmentReadState =
+    segmentReadState =
         new SegmentReadState(
             directory,
             mergeState.segmentInfo,
@@ -145,9 +168,67 @@ final class SegmentMerger {
     if (mergeState.mergeFieldInfos.hasNorms()) {
       mergeWithLogging(this::mergeNorms, segmentWriteState, segmentReadState, "norms", numMerged);
     }
+  }
 
+  /** Writes this segment's postings, reading its inputs itself. */
+  void mergePostings() throws IOException {
     mergeWithLogging(this::mergeTerms, segmentWriteState, segmentReadState, "postings", numMerged);
+  }
 
+  boolean hasPostings() {
+    return mergeState.mergeFieldInfos.hasPostings();
+  }
+
+  /** Whether this segment's postings can be written by a caller driving the pass instead. */
+  boolean supportsPushWriter() {
+    return codec.postingsFormat().supportsPushWriter(mergeState.mergeFieldInfos);
+  }
+
+  /**
+   * Opens what a postings pass writes through, for a caller that drives the pass itself rather than
+   * calling {@link #mergePostings()} -- several outputs fed from one walk of the inputs.
+   */
+  PostingsPass openPostingsPass() throws IOException {
+    NormsProducer norms = null;
+    try {
+      if (mergeState.mergeFieldInfos.hasNorms()) {
+        norms = codec.normsFormat().normsProducer(segmentReadState);
+      }
+      FieldsConsumer consumer = codec.postingsFormat().fieldsConsumer(segmentWriteState);
+      return new PostingsPass(consumer, norms);
+    } catch (Throwable t) {
+      IOUtils.closeWhileHandlingException(norms);
+      throw t;
+    }
+  }
+
+  /** The write side of one output's postings, held open across a shared pass. */
+  static final class PostingsPass implements Closeable {
+    final FieldsConsumer consumer;
+
+    /**
+     * The segment's own norms, read back from what {@link #mergeUpToPostings()} just wrote: the
+     * postings writer derives impacts from them, and looks them up by this segment's document ids.
+     */
+    final NormsProducer norms;
+
+    private final NormsProducer normsToClose;
+
+    private PostingsPass(FieldsConsumer consumer, NormsProducer norms) {
+      this.consumer = consumer;
+      this.normsToClose = norms;
+      // Reuses one IndexInput for all terms, as the per-output path does.
+      this.norms = norms == null ? null : norms.getMergeInstance();
+    }
+
+    @Override
+    public void close() throws IOException {
+      IOUtils.close(consumer, normsToClose);
+    }
+  }
+
+  /** Everything that must be written after the postings, ending with the field infos. */
+  MergeState mergeAfterPostings() throws IOException {
     if (mergeState.mergeFieldInfos.hasDocValues()) {
       mergeWithLogging(
           this::mergeDocValues, segmentWriteState, segmentReadState, "doc values", numMerged);

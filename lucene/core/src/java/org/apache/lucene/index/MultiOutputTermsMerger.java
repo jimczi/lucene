@@ -52,25 +52,37 @@ final class MultiOutputTermsMerger {
   /**
    * Writes the merged postings of {@code mergeState} into {@code consumers}, one per output.
    *
-   * @param mergeState merge state over the <b>unmasked</b> readers -- the whole input, once
+   * <p>Callers decide whether this path is available by asking the postings <i>format</i> (see
+   * {@link org.apache.lucene.codecs.PostingsFormat#supportsPushWriter(FieldInfos)}) before creating
+   * any consumer: a consumer that cannot be pushed to is discovered here only after files exist.
+   *
+   * @param mergeState the whole merged document space at once -- see {@link #wholeMergedSpace}
    * @param consumers one consumer per output, in increasing document order
+   * @param fieldInfos each output's own {@link FieldInfos}; a per-field dispatching format records
+   *     which format wrote a field on the {@link FieldInfo} it is handed, and it is the output's own
+   *     one that gets persisted
+   * @param norms each output's norms, read back after being written: the postings writer derives
+   *     impacts from them and looks them up by that output's document ids
    * @param outputStarts {@code consumers.length + 1} boundaries in merged document space; output
    *     {@code o} owns {@code [outputStarts[o], outputStarts[o+1])}
-   * @return true if the single-pass path ran; false if any consumer cannot be pushed to, in which
-   *     case nothing was written and the caller must fall back to a merge per output
    */
-  static boolean merge(
+  static void merge(
       MergeState mergeState,
-      NormsProducer norms,
       FieldsConsumer[] consumers,
+      FieldInfos[] fieldInfos,
+      NormsProducer[] norms,
       int[] outputStarts)
       throws IOException {
     assert outputStarts.length == consumers.length + 1;
+    assert fieldInfos.length == consumers.length;
+    assert norms.length == consumers.length;
 
-    // Ask before writing anything: discovering this mid-field would strand a half-written segment.
     for (FieldsConsumer c : consumers) {
       if (c.supportsPushWriter() == false) {
-        return false;
+        throw new IllegalStateException(
+            "postings format reported push support but "
+                + c.getClass().getName()
+                + " does not implement it");
       }
     }
 
@@ -95,7 +107,6 @@ final class MultiOutputTermsMerger {
             new MultiFields(fields.toArray(Fields[]::new), slices.toArray(ReaderSlice[]::new)));
 
     for (String field : merged) {
-      final FieldInfo fieldInfo = mergeState.mergeFieldInfos.fieldInfo(field);
       final Terms terms = merged.terms(field);
       if (terms == null) {
         continue;
@@ -104,6 +115,7 @@ final class MultiOutputTermsMerger {
       final TermsPushWriter[] writers = new TermsPushWriter[consumers.length];
       try {
         for (int o = 0; o < consumers.length; o++) {
+          final FieldInfo fieldInfo = fieldInfos[o].fieldInfo(field);
           writers[o] = consumers[o].pushWriter(fieldInfo);
           if (writers[o] == null) {
             // supportsPushWriter() promised otherwise, and by now earlier fields may already be
@@ -111,7 +123,7 @@ final class MultiOutputTermsMerger {
             // push-capable and push-incapable formats has to report false for the whole consumer.
             throw new IllegalStateException(
                 "supportsPushWriter() returned true but pushWriter() returned null for field '"
-                    + fieldInfo.name
+                    + field
                     + "' on "
                     + consumers[o].getClass().getName());
           }
@@ -127,7 +139,7 @@ final class MultiOutputTermsMerger {
             // An output with no document for this term yields an immediately-exhausted enum, so
             // the postings writer reports a null term state and the term is skipped for it. That
             // is the same contract write(Fields) relies on.
-            writers[o].write(term, split.viewFor(o), norms);
+            writers[o].write(term, split.viewFor(o), norms[o]);
           }
         }
       } finally {
@@ -138,7 +150,74 @@ final class MultiOutputTermsMerger {
         }
       }
     }
-    return true;
+  }
+
+  /**
+   * The whole merged document space of a partitioned merge, as one {@link MergeState}.
+   *
+   * <p>Only what a postings merge reads is meaningful on the result: the postings producers, the
+   * per-reader document counts, and document maps into the <b>whole</b> merged space rather than
+   * into one output. The rest is carried over from the first output and must not be relied on.
+   *
+   * <p>Those document maps are composed from the per-output ones rather than derived afresh from
+   * the unmasked readers. Composing is both cheaper -- it reuses a sort the outputs already paid
+   * for -- and exact: an output's document ids <i>are</i> what its own map produced, so offsetting
+   * each map by where its output starts can only agree with what the outputs actually contain,
+   * whereas a separately derived map would merely be expected to.
+   *
+   * @param outputs each output's merge state, including outputs that ended up empty
+   * @param partitions per input reader, the {@code k+1} document boundaries that split it
+   * @param outputStarts where each output begins in the merged space, {@code k+1} entries
+   */
+  static MergeState wholeMergedSpace(
+      List<MergeState> outputs, int[][] partitions, int[] outputStarts) {
+    final MergeState first = outputs.get(0);
+    final MergeState.DocMap[] docMaps = new MergeState.DocMap[first.docMaps.length];
+    for (int i = 0; i < docMaps.length; i++) {
+      final int reader = i;
+      final int[] bounds = partitions[i];
+      docMaps[i] =
+          docID -> {
+            final int output = outputOf(bounds, docID);
+            final int mapped = outputs.get(output).docMaps[reader].get(docID);
+            return mapped < 0 ? -1 : outputStarts[output] + mapped;
+          };
+    }
+    return new MergeState(
+        docMaps,
+        first.segmentInfo,
+        first.mergeFieldInfos,
+        first.storedFieldsReaders,
+        first.termVectorsReaders,
+        first.normsProducers,
+        first.docValuesProducers,
+        first.fieldInfos,
+        first.liveDocs,
+        first.fieldsProducers,
+        first.pointsReaders,
+        first.knnVectorsReaders,
+        first.maxDocs,
+        first.infoStream,
+        first.intraMergeTaskExecutor,
+        // Never the sequential DocIDMerger: a reader contributes to every output, so its documents
+        // do not form one run of the merged space no matter how the outputs are ordered.
+        true,
+        first.oneMerge);
+  }
+
+  /** The output owning {@code doc}, i.e. the only {@code o} with {@code b[o] <= doc < b[o+1]}. */
+  private static int outputOf(int[] bounds, int doc) {
+    int lo = 0;
+    int hi = bounds.length - 2;
+    while (lo < hi) {
+      final int mid = (lo + hi) >>> 1;
+      if (bounds[mid + 1] > doc) {
+        hi = mid;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    return lo;
   }
 
   /**

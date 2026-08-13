@@ -37,6 +37,7 @@ import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.codecs.TermsPushWriter;
 import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.Fields;
 import org.apache.lucene.index.FilterLeafReader.FilterFields;
 import org.apache.lucene.index.IndexOptions;
@@ -270,19 +271,7 @@ public abstract class PerFieldPostingsFormat extends PostingsFormat {
 
     @Override
     public boolean supportsPushWriter() {
-      // Answer for the fields this segment actually has, by asking each field's format. Asking the
-      // format rather than a consumer is what makes this answerable at all: instantiating a
-      // consumer would create files, and the answer is needed before anything is written.
-      for (FieldInfo fieldInfo : writeState.fieldInfos) {
-        if (fieldInfo.getIndexOptions() == IndexOptions.NONE) {
-          continue;
-        }
-        PostingsFormat format = getPostingsFormatForField(fieldInfo.name);
-        if (format == null || format.supportsPushWriter() == false) {
-          return false;
-        }
-      }
-      return true;
+      return PerFieldPostingsFormat.this.supportsPushWriter(writeState.fieldInfos);
     }
 
     @Override
@@ -431,6 +420,23 @@ public abstract class PerFieldPostingsFormat extends PostingsFormat {
   @Override
   public final FieldsProducer fieldsProducer(SegmentReadState state) throws IOException {
     return new FieldsReader(state);
+  }
+
+  @Override
+  public boolean supportsPushWriter(FieldInfos fieldInfos) {
+    // Answer for the fields this segment actually has, by asking each field's format. Asking the
+    // formats rather than consumers is what makes this answerable at all: instantiating a consumer
+    // would create files, and the answer is needed before anything is written.
+    for (FieldInfo fieldInfo : fieldInfos) {
+      if (fieldInfo.getIndexOptions() == IndexOptions.NONE) {
+        continue;
+      }
+      PostingsFormat format = getPostingsFormatForField(fieldInfo.name);
+      if (format == null || format.supportsPushWriter() == false) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**

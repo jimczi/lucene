@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.util.ServiceLoader;
 import java.util.Set;
 import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat; // javadocs
+import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.util.NamedSPILoader;
@@ -104,6 +105,17 @@ public abstract class PostingsFormat implements NamedSPILoader.NamedSPI {
    */
   public boolean supportsPushWriter() {
     return false;
+  }
+
+  /**
+   * The same question, restricted to the fields a segment actually holds. A format that dispatches
+   * per field can only answer for the fields it will be asked about, so callers that hold the
+   * segment's {@link FieldInfos} should ask this way.
+   *
+   * @lucene.experimental
+   */
+  public boolean supportsPushWriter(FieldInfos fieldInfos) {
+    return supportsPushWriter();
   }
 
   /**
