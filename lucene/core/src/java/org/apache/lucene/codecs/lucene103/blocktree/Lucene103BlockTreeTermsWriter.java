@@ -26,6 +26,7 @@ import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.FieldsConsumer;
 import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.codecs.PostingsWriterBase;
+import org.apache.lucene.codecs.TermsPushWriter;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.Fields;
@@ -394,6 +395,32 @@ public final class Lucene103BlockTreeTermsWriter extends FieldsConsumer {
 
       // if (DEBUG) System.out.println("\nBTTW.write done seg=" + segment + " field=" + field);
     }
+  }
+
+  /**
+   * {@link TermsWriter} is already push-shaped -- it takes one term at a time -- so the push API is
+   * that class, exposed. {@link #write(Fields,NormsProducer)} above is a loop around exactly these
+   * two calls.
+   */
+  @Override
+  public boolean supportsPushWriter() {
+    return true;
+  }
+
+  @Override
+  public TermsPushWriter pushWriter(FieldInfo fieldInfo) {
+    final TermsWriter termsWriter = new TermsWriter(fieldInfo);
+    return new TermsPushWriter() {
+      @Override
+      public void write(BytesRef term, TermsEnum source, NormsProducer norms) throws IOException {
+        termsWriter.write(term, source, norms);
+      }
+
+      @Override
+      public void close() throws IOException {
+        termsWriter.finish();
+      }
+    };
   }
 
   private static class PendingEntry {

@@ -343,6 +343,17 @@ public abstract class MergePolicy {
      * starting at {@code 0} and ending at that input's {@code maxDoc}: output {@code o} takes docs
      * {@code [b[o], b[o+1])} from that input.
      *
+     * <p><b>Cost:</b> the merge runs once per output, so it reads its inputs {@code k} times for
+     * {@code k} partitions. Bytes written are unaffected -- every document is written exactly once,
+     * into whichever output owns it -- but read and CPU cost scale linearly with the output count.
+     * Prefer a modest fan-out per merge, applied repeatedly, over a single wide split.
+     *
+     * <p>That cost sits almost entirely in the inverted index, and is avoidable there: stored
+     * fields, doc values and points hand each output a contiguous doc range it can seek past,
+     * whereas a terms dictionary is ordered by term, so every output must walk all of it and read
+     * every posting. See {@link org.apache.lucene.codecs.TermsPushWriter} for the single-pass
+     * alternative.
+     *
      * <p>Expressing the split as boundaries rather than arbitrary doc sets makes the two properties
      * {@link IndexWriter} depends on structural rather than a caller obligation: the outputs are
      * <b>disjoint</b> and together <b>cover every document</b>. {@link IndexWriter} validates the

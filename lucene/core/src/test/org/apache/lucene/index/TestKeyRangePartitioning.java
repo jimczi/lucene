@@ -177,6 +177,44 @@ public class TestKeyRangePartitioning extends LuceneTestCase {
   }
 
   /**
+   * A wide split: real callers partition into tens of ranges, not two or three. Exercises the
+   * partition spec, the per-output doc maps and the empty-output path at that width.
+   */
+  public void testManyOutputs() throws Exception {
+    final int outputs = 64;
+    try (Directory dir = newDirectory()) {
+      IndexWriterConfig iwc = newIndexWriterConfig(null);
+      iwc.setIndexSort(new Sort(new SortField(KEY, SortField.Type.STRING)));
+      iwc.setMergePolicy(new Partitioner(readers -> keyBoundaryPartitions(readers, KEY, outputs)));
+      Set<String> expected = new HashSet<>();
+      try (IndexWriter w = new IndexWriter(dir, iwc)) {
+        for (int s = 0; s < 4; s++) {
+          for (int k = 0; k < 500; k++) {
+            String key = String.format(java.util.Locale.ROOT, "k%05d", k);
+            Document doc = new Document();
+            doc.add(new SortedDocValuesField(KEY, new BytesRef(key)));
+            doc.add(new StoredField("id", s + ":" + k));
+            w.addDocument(doc);
+            expected.add(s + ":" + k);
+          }
+          w.flush();
+        }
+        w.commit();
+        w.maybeMerge();
+      }
+      try (DirectoryReader r = DirectoryReader.open(dir)) {
+        assertTrue("expected a wide split, got " + r.leaves().size(), r.leaves().size() > 8);
+        Set<String> seen = new HashSet<>();
+        for (LeafReaderContext ctx : r.leaves()) {
+          StoredFields sf = ctx.reader().storedFields();
+          for (int doc = 0; doc < ctx.reader().maxDoc(); doc++) seen.add(sf.document(doc).get("id"));
+        }
+        assertEquals("a wide split must not lose or duplicate documents", expected, seen);
+      }
+    }
+  }
+
+  /**
    * An output that owns no document in a given input is legal: a key missing from that input makes
    * two cuts land on the same offset. The merge must still succeed and produce the other outputs.
    */
