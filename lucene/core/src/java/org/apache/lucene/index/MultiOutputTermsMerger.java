@@ -83,15 +83,6 @@ final class MultiOutputTermsMerger {
     assert fieldInfos.length == consumers.length;
     assert norms.length == consumers.length;
 
-    for (FieldsConsumer c : consumers) {
-      if (c.supportsPushWriter() == false) {
-        throw new IllegalStateException(
-            "postings format reported push support but "
-                + c.getClass().getName()
-                + " does not implement it");
-      }
-    }
-
     final List<Fields> fields = new ArrayList<>();
     final List<ReaderSlice> slices = new ArrayList<>();
     int docBase = 0;
@@ -99,8 +90,9 @@ final class MultiOutputTermsMerger {
       final FieldsProducer f = mergeState.fieldsProducers[readerIndex];
       final int maxDoc = mergeState.maxDocs[readerIndex];
       if (f != null) {
+        // No checkIntegrity here, unlike FieldsConsumer.merge: the caller of a partitioned merge
+        // verifies every input once, before any output exists.
         mergeState.checkAborted();
-        f.checkIntegrity(mergeState.oneMerge);
         slices.add(new ReaderSlice(docBase, maxDoc, readerIndex));
         fields.add(f);
       }
@@ -189,26 +181,9 @@ final class MultiOutputTermsMerger {
             return mapped < 0 ? -1 : outputStarts[output] + mapped;
           };
     }
-    return new MergeState(
-        docMaps,
-        first.segmentInfo,
-        first.mergeFieldInfos,
-        first.storedFieldsReaders,
-        first.termVectorsReaders,
-        first.normsProducers,
-        first.docValuesProducers,
-        first.fieldInfos,
-        first.liveDocs,
-        first.fieldsProducers,
-        first.pointsReaders,
-        first.knnVectorsReaders,
-        first.maxDocs,
-        first.infoStream,
-        first.intraMergeTaskExecutor,
-        // Never the sequential DocIDMerger: a reader contributes to every output, so its documents
-        // do not form one run of the merged space no matter how the outputs are ordered.
-        true,
-        first.oneMerge);
+    // Never the sequential DocIDMerger: a reader contributes to every output, so its documents do
+    // not form one run of the merged space no matter how the outputs are ordered.
+    return new MergeState(first, docMaps, true);
   }
 
   /** The output owning {@code doc}, i.e. the only {@code o} with {@code b[o] <= doc < b[o+1]}. */

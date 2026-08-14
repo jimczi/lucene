@@ -217,6 +217,32 @@ public abstract class MergePolicy {
 
     volatile long mergeStartNS = -1;
 
+    private volatile boolean inputsVerified;
+
+    /**
+     * Whether this merge has already verified the checksums of every file of every input, so that a
+     * pass over them need only check that the footer is intact.
+     *
+     * <p>Each codec opens its merge by checksumming the input files it is about to read, which
+     * costs a full read of them; an ordinary merge therefore reads its inputs twice to write them
+     * once. A merge that runs several passes over the same inputs -- one per output of a
+     * partitioned merge -- would pay that once per pass, and a second verification of the same
+     * bytes cannot find anything the first one missed.
+     *
+     * @lucene.internal
+     */
+    public boolean areInputsVerified() {
+      return inputsVerified;
+    }
+
+    /**
+     * Records that every input of this merge has been verified. Only {@link IndexWriter} sets this,
+     * and only after verifying all of them, so it can never suppress a check that has not happened.
+     */
+    void markInputsVerified() {
+      inputsVerified = true;
+    }
+
     /** Total number of documents in segments to be merged, not accounting for deletions. */
     final int totalMaxDoc;
 

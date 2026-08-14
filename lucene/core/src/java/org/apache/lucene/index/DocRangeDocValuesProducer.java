@@ -18,7 +18,6 @@ package org.apache.lucene.index;
 
 import java.io.IOException;
 import org.apache.lucene.codecs.DocValuesProducer;
-import org.apache.lucene.util.BytesRef;
 
 /**
  * A doc values producer whose iterators cover only {@code [start, end)} of the segment.
@@ -33,6 +32,10 @@ import org.apache.lucene.util.BytesRef;
  * <p>Only the iteration is restricted. The value space -- the term dictionary behind a sorted field
  * and the ordinals into it -- is left whole, because a merge builds its ordinal map from it and
  * expects the same dictionary a full reader would have shown.
+ *
+ * <p>The five kinds of doc values differ only in the values they hand back, and not at all in how
+ * they are iterated, so each one below is Lucene's plain filter for its kind with the iteration
+ * taken over by a shared {@link RangeCursor}.
  */
 final class DocRangeDocValuesProducer extends DocValuesProducer {
 
@@ -46,28 +49,37 @@ final class DocRangeDocValuesProducer extends DocValuesProducer {
     this.end = end;
   }
 
-  /**
-   * Positions {@code values} at its first document inside the range.
-   *
-   * @return that document, or {@link DocValuesIterator#NO_MORE_DOCS} if the range holds none
-   */
-  private int firstInRange(DocValuesIterator values) throws IOException {
-    final int doc = values.advance(start);
-    return doc >= end ? DocValuesIterator.NO_MORE_DOCS : doc;
-  }
+  /** Iteration restricted to {@code [start, end)}, over any kind of doc values. */
+  private final class RangeCursor {
+    private final DocValuesIterator values;
+    private int doc = -1;
 
-  private int nextInRange(DocValuesIterator values) throws IOException {
-    final int doc = values.nextDoc();
-    return doc >= end ? DocValuesIterator.NO_MORE_DOCS : doc;
-  }
+    RangeCursor(DocValuesIterator values) {
+      this.values = values;
+    }
 
-  private int advanceInRange(DocValuesIterator values, int target) throws IOException {
-    final int doc = values.advance(Math.max(target, start));
-    return doc >= end ? DocValuesIterator.NO_MORE_DOCS : doc;
-  }
+    int docID() {
+      return doc;
+    }
 
-  private boolean inRange(int target) {
-    return target >= start && target < end;
+    int nextDoc() throws IOException {
+      // The first call seeks to the range; the rest walk inside it. Reaching its end is the end of
+      // the iteration, not a step to the next document.
+      return doc = clamp(doc < start ? values.advance(start) : values.nextDoc());
+    }
+
+    int advance(int target) throws IOException {
+      return doc = clamp(values.advance(Math.max(target, start)));
+    }
+
+    boolean advanceExact(int target) throws IOException {
+      doc = target;
+      return target >= start && target < end && values.advanceExact(target);
+    }
+
+    private int clamp(int doc) {
+      return doc >= end ? DocValuesIterator.NO_MORE_DOCS : doc;
+    }
   }
 
   @Override
@@ -76,41 +88,27 @@ final class DocRangeDocValuesProducer extends DocValuesProducer {
     if (values == null) {
       return null;
     }
-    return new NumericDocValues() {
-      private int doc = -1;
+    return new FilterNumericDocValues(values) {
+      final RangeCursor cursor = new RangeCursor(values);
 
       @Override
       public int docID() {
-        return doc;
+        return cursor.docID();
       }
 
       @Override
       public int nextDoc() throws IOException {
-        return doc = doc < start ? firstInRange(values) : nextInRange(values);
+        return cursor.nextDoc();
       }
 
       @Override
       public int advance(int target) throws IOException {
-        return doc = advanceInRange(values, target);
+        return cursor.advance(target);
       }
 
       @Override
       public boolean advanceExact(int target) throws IOException {
-        if (inRange(target) == false) {
-          return false;
-        }
-        doc = target;
-        return values.advanceExact(target);
-      }
-
-      @Override
-      public long cost() {
-        return values.cost();
-      }
-
-      @Override
-      public long longValue() throws IOException {
-        return values.longValue();
+        return cursor.advanceExact(target);
       }
     };
   }
@@ -121,41 +119,27 @@ final class DocRangeDocValuesProducer extends DocValuesProducer {
     if (values == null) {
       return null;
     }
-    return new BinaryDocValues() {
-      private int doc = -1;
+    return new FilterBinaryDocValues(values) {
+      final RangeCursor cursor = new RangeCursor(values);
 
       @Override
       public int docID() {
-        return doc;
+        return cursor.docID();
       }
 
       @Override
       public int nextDoc() throws IOException {
-        return doc = doc < start ? firstInRange(values) : nextInRange(values);
+        return cursor.nextDoc();
       }
 
       @Override
       public int advance(int target) throws IOException {
-        return doc = advanceInRange(values, target);
+        return cursor.advance(target);
       }
 
       @Override
       public boolean advanceExact(int target) throws IOException {
-        if (inRange(target) == false) {
-          return false;
-        }
-        doc = target;
-        return values.advanceExact(target);
-      }
-
-      @Override
-      public long cost() {
-        return values.cost();
-      }
-
-      @Override
-      public BytesRef binaryValue() throws IOException {
-        return values.binaryValue();
+        return cursor.advanceExact(target);
       }
     };
   }
@@ -166,56 +150,27 @@ final class DocRangeDocValuesProducer extends DocValuesProducer {
     if (values == null) {
       return null;
     }
-    return new SortedDocValues() {
-      private int doc = -1;
+    return new FilterSortedDocValues(values) {
+      final RangeCursor cursor = new RangeCursor(values);
 
       @Override
       public int docID() {
-        return doc;
+        return cursor.docID();
       }
 
       @Override
       public int nextDoc() throws IOException {
-        return doc = doc < start ? firstInRange(values) : nextInRange(values);
+        return cursor.nextDoc();
       }
 
       @Override
       public int advance(int target) throws IOException {
-        return doc = advanceInRange(values, target);
+        return cursor.advance(target);
       }
 
       @Override
       public boolean advanceExact(int target) throws IOException {
-        if (inRange(target) == false) {
-          return false;
-        }
-        doc = target;
-        return values.advanceExact(target);
-      }
-
-      @Override
-      public long cost() {
-        return values.cost();
-      }
-
-      @Override
-      public int ordValue() throws IOException {
-        return values.ordValue();
-      }
-
-      @Override
-      public BytesRef lookupOrd(int ord) throws IOException {
-        return values.lookupOrd(ord);
-      }
-
-      @Override
-      public int getValueCount() {
-        return values.getValueCount();
-      }
-
-      @Override
-      public TermsEnum termsEnum() throws IOException {
-        return values.termsEnum();
+        return cursor.advanceExact(target);
       }
     };
   }
@@ -226,46 +181,27 @@ final class DocRangeDocValuesProducer extends DocValuesProducer {
     if (values == null) {
       return null;
     }
-    return new SortedNumericDocValues() {
-      private int doc = -1;
+    return new FilterSortedNumericDocValues(values) {
+      final RangeCursor cursor = new RangeCursor(values);
 
       @Override
       public int docID() {
-        return doc;
+        return cursor.docID();
       }
 
       @Override
       public int nextDoc() throws IOException {
-        return doc = doc < start ? firstInRange(values) : nextInRange(values);
+        return cursor.nextDoc();
       }
 
       @Override
       public int advance(int target) throws IOException {
-        return doc = advanceInRange(values, target);
+        return cursor.advance(target);
       }
 
       @Override
       public boolean advanceExact(int target) throws IOException {
-        if (inRange(target) == false) {
-          return false;
-        }
-        doc = target;
-        return values.advanceExact(target);
-      }
-
-      @Override
-      public long cost() {
-        return values.cost();
-      }
-
-      @Override
-      public long nextValue() throws IOException {
-        return values.nextValue();
-      }
-
-      @Override
-      public int docValueCount() {
-        return values.docValueCount();
+        return cursor.advanceExact(target);
       }
     };
   }
@@ -276,61 +212,27 @@ final class DocRangeDocValuesProducer extends DocValuesProducer {
     if (values == null) {
       return null;
     }
-    return new SortedSetDocValues() {
-      private int doc = -1;
+    return new FilterSortedSetDocValues(values) {
+      final RangeCursor cursor = new RangeCursor(values);
 
       @Override
       public int docID() {
-        return doc;
+        return cursor.docID();
       }
 
       @Override
       public int nextDoc() throws IOException {
-        return doc = doc < start ? firstInRange(values) : nextInRange(values);
+        return cursor.nextDoc();
       }
 
       @Override
       public int advance(int target) throws IOException {
-        return doc = advanceInRange(values, target);
+        return cursor.advance(target);
       }
 
       @Override
       public boolean advanceExact(int target) throws IOException {
-        if (inRange(target) == false) {
-          return false;
-        }
-        doc = target;
-        return values.advanceExact(target);
-      }
-
-      @Override
-      public long cost() {
-        return values.cost();
-      }
-
-      @Override
-      public long nextOrd() throws IOException {
-        return values.nextOrd();
-      }
-
-      @Override
-      public int docValueCount() {
-        return values.docValueCount();
-      }
-
-      @Override
-      public BytesRef lookupOrd(long ord) throws IOException {
-        return values.lookupOrd(ord);
-      }
-
-      @Override
-      public long getValueCount() {
-        return values.getValueCount();
-      }
-
-      @Override
-      public TermsEnum termsEnum() throws IOException {
-        return values.termsEnum();
+        return cursor.advanceExact(target);
       }
     };
   }
@@ -343,9 +245,8 @@ final class DocRangeDocValuesProducer extends DocValuesProducer {
   }
 
   @Override
-  public void checkIntegrity(MergePolicy.OneMerge merge) {
-    // The merge verified this segment once, before its outputs were built. See
-    // DocRangeCodecReader, which suppresses the same check for every other format.
+  public void checkIntegrity(MergePolicy.OneMerge merge) throws IOException {
+    in.checkIntegrity(merge);
   }
 
   @Override

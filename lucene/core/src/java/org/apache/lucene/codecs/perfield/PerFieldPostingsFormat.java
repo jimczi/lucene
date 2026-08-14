@@ -270,11 +270,6 @@ public abstract class PerFieldPostingsFormat extends PostingsFormat {
     private final Map<String, Integer> pushSuffixes = new HashMap<>();
 
     @Override
-    public boolean supportsPushWriter() {
-      return PerFieldPostingsFormat.this.supportsPushWriter(writeState.fieldInfos);
-    }
-
-    @Override
     public TermsPushWriter pushWriter(FieldInfo fieldInfo) throws IOException {
       final String field = fieldInfo.name;
       final PostingsFormat format = getPostingsFormatForField(field);

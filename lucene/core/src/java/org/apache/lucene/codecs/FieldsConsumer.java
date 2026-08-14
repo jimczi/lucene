@@ -74,35 +74,17 @@ public abstract class FieldsConsumer implements Closeable {
    * {@link TermsPushWriter}.
    *
    * <p>Fields must still be written in increasing order, and the returned writer must be closed
-   * before the next field is started. Returning {@code null} is always safe -- callers are required
-   * to fall back to {@code write}.
+   * before the next field is started.
+   *
+   * <p>A caller that cannot fall back to {@code write} -- a merge feeding several outputs cannot,
+   * since discovering the answer part-way through would leave partially written segments behind --
+   * must ask {@link PostingsFormat#supportsPushWriter(org.apache.lucene.index.FieldInfos)} before
+   * creating any consumer, because creating one already creates files.
    *
    * @lucene.experimental
    */
   public TermsPushWriter pushWriter(FieldInfo fieldInfo) throws IOException {
     return null;
-  }
-
-  /**
-   * Whether {@link #pushWriter} is supported. Callers must consult this <i>before</i> writing
-   * anything, since discovering the answer part-way through would leave a partially written segment
-   * behind.
-   *
-   * <p>Returning {@code true} is a promise that {@link #pushWriter} will not return {@code null}
-   * for any field this segment contains. A consumer that dispatches per field to other formats
-   * answers by asking each of those formats -- see {@link PostingsFormat#supportsPushWriter()},
-   * which exists on the format precisely so this can be answered without instantiating consumers.
-   *
-   * <p>The default is {@code false} rather than a working fallback because no useful fallback
-   * exists: the only thing this class can do generically is buffer every pushed term, or re-read
-   * the source once per output, which is the cost this API is meant to remove. Reporting the
-   * capability keeps that cost visible to the caller instead of hiding it behind an API that looks
-   * like a single pass.
-   *
-   * @lucene.experimental
-   */
-  public boolean supportsPushWriter() {
-    return false;
   }
 
   /**

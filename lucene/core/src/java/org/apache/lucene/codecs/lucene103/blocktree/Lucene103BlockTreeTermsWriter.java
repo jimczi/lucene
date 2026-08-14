@@ -403,11 +403,6 @@ public final class Lucene103BlockTreeTermsWriter extends FieldsConsumer {
    * two calls.
    */
   @Override
-  public boolean supportsPushWriter() {
-    return true;
-  }
-
-  @Override
   public TermsPushWriter pushWriter(FieldInfo fieldInfo) {
     final TermsWriter termsWriter = new TermsWriter(fieldInfo);
     return new TermsPushWriter() {
