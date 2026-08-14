@@ -936,11 +936,13 @@ public class ContainerIndependence {
                             System.out.printf(Locale.ROOT,
                                 "  └─ partition: %d merges, %,d input docs vs %,d indexed (%.2fx), "
                                 + "%,d outputs total, k=%d | splits %d, id-splits %d, "
-                                + "consolidations %d, reclaims %d%n",
+                                + "consolidations %d (of which %d re-compact L0, %,d MB), "
+                                + "reclaims %d%n",
                                 PE.partitionMerges, PE.partitionInputDocs, DOCS_INDEXED,
                                 PE.partitionInputDocs / (double) Math.max(1, DOCS_INDEXED),
                                 PE.partitionOutputs, 1 << PE.depth,
-                                PE.splits, PE.idSplits, PE.merges, PE.reclaims);
+                                PE.splits, PE.idSplits, PE.merges, PE.l0Consolidations,
+                                PE.l0ConsolidationBytes >> 20, PE.reclaims);
                         }
                         long tot = Math.max(1, st.wFlush + st.wSplit + st.wTier);
                         System.out.printf(Locale.ROOT,

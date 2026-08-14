@@ -42,7 +42,8 @@ public class FixedRangePolicy extends MergePolicy {
     /** current subdivision depth: 2^depth ranges. Grows with the index, never shrinks. */
     int depth = 0;
     int l0Trigger = 4;
-    int splits, merges, idSplits, reclaims;
+    int splits, merges, idSplits, reclaims, l0Consolidations;
+    long l0ConsolidationBytes;
     /** How many documents pass through a partition merge, and how many outputs each produced.
      *  If inputDocs ~= docs indexed, every document is partitioned exactly once. If it is a
      *  multiple, "partition once" is not holding and the cause is the policy, not overhead. */
@@ -181,6 +182,14 @@ public class FixedRangePolicy extends MergePolicy {
         for (SegmentCommitInfo si : infos) {
             long[] e = extremes.get(si.info.name);
             if (e == null || sizeOf(si) > targetBytes) continue;
+            // NOTE: L0 is deliberately NOT excluded here, though compacting arrived-but-
+            // unpartitioned data with itself looks like pure waste -- it was measured at 18% of all
+            // bytes written and two thirds of what straddles a split boundary. Excluding it was
+            // tried and is a net loss: this compaction is what ACCUMULATES enough data that a
+            // k-way split produces useful-sized outputs. Without it, partitioning fires on small
+            // batches and 64 outputs are 64 slivers -- segments 54 -> 135, fan-out 5.0 -> 9.0 per
+            // query -- which costs more than the 18% it saves. See the note's section on splitting
+            // at flush: the accumulator has to come from somewhere.
             byRange.computeIfAbsent(bucketOf(e), k -> new ArrayList<>()).add(si);
         }
         for (List<SegmentCommitInfo> group : byRange.values()) {
@@ -194,7 +203,19 @@ public class FixedRangePolicy extends MergePolicy {
                 if (si.info.maxDoc() > smallest * 4L) break;
                 take.add(si);
             }
-            if (take.size() >= ratio) { spec.add(new OneMerge(take)); merges++; }
+            if (take.size() >= ratio) {
+                spec.add(new OneMerge(take));
+                merges++;
+                // Consolidating L0 with itself is pure waste: these segments span the whole key
+                // space, so the merge produces a bigger segment that still has to be partitioned,
+                // and in the meantime it is what straddles every split boundary. Counted so the
+                // cost of doing it is a number rather than an argument.
+                long[] e0 = extremes.get(take.get(0).info.name);
+                if (e0 != null && depthOf(e0[0], e0[1]) == 0) {
+                    l0Consolidations++;
+                    for (SegmentCommitInfo si : take) l0ConsolidationBytes += sizeOf(si);
+                }
+            }
         }
         if (!spec.merges.isEmpty()) { lastWasConsolidation = true; return spec; }
 
