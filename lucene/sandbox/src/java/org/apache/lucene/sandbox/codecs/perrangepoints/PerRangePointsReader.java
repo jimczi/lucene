@@ -108,16 +108,16 @@ final class PerRangePointsReader extends PointsReader {
   }
 
   /**
-   * The same segment with only the ranges that still hold a document after {@code docMap}, for a
-   * merge output that keeps some ranges and discards the rest.
+   * The same segment with only the ranges that still hold a document after {@code docMap}, which is
+   * the whole reason points are stored per range: the ranges an output discards are never read at
+   * all. With one tree over the segment an output would have to read every point before finding out
+   * it wanted none of them, so a merge into k outputs read them k times.
    *
-   * <p>This is the whole reason points are stored per range: the discarded ranges are never read.
-   * With one tree over the segment an output would have to read all of the points before finding
-   * out that it wanted none of them, so a merge into k outputs read them k times.
-   *
-   * <p>The returned reader shares this one's sub-readers and must not be closed.
+   * <p>The returned reader shares this one's sub-readers, and so is not closed separately -- which
+   * is what {@link PointsReader#getMergeInstance} already promises its callers.
    */
-  PointsReader survivingOnly(MergeState.DocMap docMap) {
+  @Override
+  public PointsReader getMergeInstance(MergeState.DocMap docMap) {
     final PointsReader[] kept = new PointsReader[subs.length];
     for (int r = 0; r < subs.length; r++) {
       if (subs[r] == null) {

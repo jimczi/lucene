@@ -20,6 +20,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.MergePolicy;
+import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.PointValues;
 
 /**
@@ -57,5 +58,23 @@ public abstract class PointsReader implements Closeable {
    */
   public PointsReader getMergeInstance() {
     return this;
+  }
+
+  /**
+   * Returns an instance optimized for merging into an output that keeps only the documents {@code
+   * docMap} maps to a document, discarding the rest. This instance may only be used in the thread
+   * that acquires it, and is not closed separately from the reader it came from.
+   *
+   * <p>A merge that splits its input into several outputs calls this once per output, so a reader
+   * holding its points in per-document-range pieces can hand back only the pieces an output still
+   * wants and leave the others unread. Without it such a merge reads all of the points once per
+   * output to discover that most of them map nowhere, because points are ordered by value rather
+   * than by document and an output's documents are therefore spread through every leaf.
+   *
+   * <p>The default implementation cannot know how its points are laid out, so it ignores the map
+   * and returns {@link #getMergeInstance()}.
+   */
+  public PointsReader getMergeInstance(MergeState.DocMap docMap) {
+    return getMergeInstance();
   }
 }

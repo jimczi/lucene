@@ -86,10 +86,13 @@ final class PerRangePointsWriter extends PointsWriter {
    */
   @Override
   public void merge(MergeState mergeState) throws IOException {
-    final PointsReader[] narrowed = narrowInputs(mergeState);
-    if (narrowed == null) {
-      super.merge(mergeState);
-      return;
+    // Each input is asked to narrow itself to what this output keeps. A reader that stores its
+    // points per range hands back only the ranges still wanted; any other reader returns itself,
+    // which is why this needs no test of what kind of reader it got.
+    final PointsReader[] narrowed = new PointsReader[mergeState.pointsReaders.length];
+    for (int i = 0; i < narrowed.length; i++) {
+      final PointsReader in = mergeState.pointsReaders[i];
+      narrowed[i] = in == null ? null : in.getMergeInstance(mergeState.docMaps[i]);
     }
     super.merge(
         new MergeState(
@@ -110,53 +113,6 @@ final class PerRangePointsWriter extends PointsWriter {
             mergeState.intraMergeTaskExecutor,
             mergeState.needsIndexSort,
             mergeState.oneMerge));
-  }
-
-  /**
-   * Every input narrowed to the ranges that still hold a document this output keeps, or null if the
-   * per-range merge does not apply to this set of inputs.
-   *
-   * <p>It applies or it does not, never partly: an input this format did not write has no ranges to
-   * skip, so mixing would read one input whole and the others by range while reporting nothing
-   * about the difference. Both outcomes are correct -- what changes is whether the merge costs one
-   * read of the points or one per output -- so the case that does not apply is reported rather than
-   * refused. Adding an index written by a plain codec is a legitimate way to reach it.
-   *
-   * <p>Recognising our own reader by type is sound here, and it is worth saying why, because the
-   * same move is not sound for postings. There is no per-field points format: {@link
-   * MergeState#pointsReaders} holds exactly what {@link PerRangePointsFormat#fieldsReader}
-   * returned, with nothing wrapped around it. Should a dispatching points format ever appear, an
-   * input would stop being recognised, and the reason below is what would say so.
-   */
-  private PointsReader[] narrowInputs(MergeState mergeState) {
-    final PointsReader[] narrowed = new PointsReader[mergeState.pointsReaders.length];
-    for (int i = 0; i < narrowed.length; i++) {
-      final PointsReader in = mergeState.pointsReaders[i];
-      if (in == null) {
-        continue; // this input has no points at all, which disqualifies nothing
-      }
-      if (in instanceof PerRangePointsReader == false) {
-        report(
-            "input "
-                + i
-                + " is a "
-                + in.getClass().getName()
-                + " rather than a "
-                + PerRangePointsReader.class.getSimpleName()
-                + ", so it has no ranges to skip");
-        return null;
-      }
-      narrowed[i] = ((PerRangePointsReader) in).survivingOnly(mergeState.docMaps[i]);
-    }
-    return narrowed;
-  }
-
-  private void report(String reason) {
-    if (state.infoStream.isEnabled(PerRangePointsFormat.NAME)) {
-      state.infoStream.message(
-          PerRangePointsFormat.NAME,
-          "merging points through every range instead of range by range: " + reason);
-    }
   }
 
   @Override
