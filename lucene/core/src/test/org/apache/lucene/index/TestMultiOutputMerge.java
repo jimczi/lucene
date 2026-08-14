@@ -558,6 +558,13 @@ public class TestMultiOutputMerge extends LuceneTestCase {
       }
       MergeSpecification spec = new MergeSpecification();
       spec.add(new Partitioned(segs, parts));
+      // One partitioned merge per test, and then done. This policy has no fixed point -- it
+      // answers every request while there is more than one segment, and it turns OUTPUTS
+      // segments back into OUTPUTS segments -- while IndexWriter asks the policy again after
+      // every merge it finishes. Under the concurrent scheduler the writer closes out from
+      // under that; under the serial one, which the framework picks at random, the scheduler
+      // drains the queue in a loop and the merges never stop.
+      enabled = false;
       return spec;
     }
 
