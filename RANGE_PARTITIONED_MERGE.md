@@ -11,12 +11,13 @@ Lucene-side status, so that the code and the note do not drift.
 
 ## The pieces, and whether each one earns its place
 
-Measured with `.agents/slice-sim/ContainerIndependence.java` in the Elasticsearch worktree, against
-plain `TieredMergePolicy` on the same corpus.
+Measured with `slice-benchmark/` in this repo — `ContainerIndependence` drives three arms over one
+corpus, and its README lists the ways it has measured the wrong thing. Comparisons below are against
+plain `TieredMergePolicy` on the same corpus, at 245 MB unless a size is given.
 
 | piece | ~lines | load-bearing? | evidence |
 |---|---|---|---|
-| the primitive — `OneMerge.isPartitioned`/`getDocRangePartitions`, `DocRangeCodecReader`, `IndexWriter.multiOutputMergeMiddle`, `SegmentInfos.applyMergeChanges` | 1,000 | it **is** the feature | 2,630 bytes and 6.0 segments per single-slice query, against 10,490 and 26.0 |
+| the primitive — `OneMerge.isPartitioned`/`getDocRangePartitions`, `DocRangeCodecReader`, `IndexWriter.multiOutputMergeMiddle`, `SegmentInfos.applyMergeChanges` | 1,000 | it **is** the feature | 1,372 bytes and 3.0 segments per single-slice query at 100 M documents, against 10,404 and 28.0; and the shard split below |
 | single-pass postings — `TermsPushWriter`, `MultiOutputTermsMerger`, `PerFieldPostingsFormat` dispatch | 500 | **yes** | A/B on a text corpus at k=64: a split merge reads 2.62x its writes with it, **9.59x without**; `.tim` 58 -> 682 MB |
 | doc-values narrowing — `DocRangeDocValuesProducer` | 256 | **yes** | `dvd` 15.35x -> 8.50x |
 | verify inputs once — `OneMerge.areInputsVerified`, early return in `CodecUtil` | 60 | **yes** | split merge read/write 14.03 -> 2.19 |
@@ -24,8 +25,15 @@ plain `TieredMergePolicy` on the same corpus.
 | per-range points — `lucene/sandbox/.../perrangepoints` | 1,200 | **no, at this ratio** | recovers 73 MB of 1,124, i.e. 6.5% of merge reads |
 
 **The headline:** a partitioned merge reads **2.19x** what it writes, against **2.03x** for an
-ordinary merge. It is not proportional to the output count. Every Lucene merge reads its inputs twice
-— once to verify, once to copy — and this one now costs the same.
+ordinary merge — and **1.99x against 2.07x** at 100 M documents. It is not proportional to the output
+count. Every Lucene merge reads its inputs twice — once to verify, once to copy — and this one now
+costs the same.
+
+**What the primitive is ultimately for, measured by doing it.** `measureShardSplit` picks the boundary
+a controller would choose and performs the split with one two-output partitioned merge. On a 3.7 GB
+index it cuts **1 segment of 42** and rewrites **250 MB — 6.8% of the index**; the hash-routed arm,
+which has no boundary its segments respect, cuts 26 of 28 and rewrites 3,522 MB, or 95.2%. That is
+the primitive's reason to exist, expressed as bytes.
 
 ## What each fix was for
 

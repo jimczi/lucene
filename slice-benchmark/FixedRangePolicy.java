@@ -340,11 +340,16 @@ public class FixedRangePolicy extends MergePolicy {
 
         lastWasConsolidation = false;
 
-        // 2. Push data down ONE level at a time, splitting by a modest fan-out.
+        // 2. Partition ARRIVING data, in one merge, straight to the depth the index needs.
         //
         //    A document is rewritten once per level it descends, so descending level by level would
         //    cost log_k(R) rewrites. This goes straight to the target depth in ONE merge instead,
-        //    so every document is written exactly once per partition event.
+        //    so every document is written exactly once per partition event: 1<<depth outputs, and
+        //    depth climbs the ladder in FANOUT_BITS steps, so k is 4, 16, 64 or 256.
+        //
+        //    Note which fan-out is which, since three numbers here are easy to confuse. FANOUT_BITS
+        //    is the STEP OF THE DEPTH LADDER (2 bits), this rule splits arrivals k=1<<depth ways in
+        //    one merge, and rule 3 -- refinement -- always descends exactly ONE bit, two ways.
         //
         //    That used to be the expensive choice and is no longer: a k-way split used to read its
         //    inputs about k+1 times, because each codec verifies every input file at the start of
