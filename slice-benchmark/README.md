@@ -15,6 +15,12 @@ Three arms over one corpus — `nomerge` (the denominator), `stock` (`TieredMerg
 (`FixedRangePolicy`) — reporting bytes and segments per single-tenant query, write amplification
 against a no-merge build, and merge IO attributed **per `OneMerge` and per file extension**.
 
+Each arm then **performs a shard split** rather than estimating one: it picks the boundary a
+controller would choose — candidates are every segment's minimum key plus the median key of the
+largest segment, scored on an even document split first and fewest segments cut second — and cuts the
+straddling segments with a single two-output partitioned merge (`FixedRangePolicy.KeySplit`), counting
+the bytes. It runs last, after both probes, because it rewrites the index.
+
 ## The configurations the numbers come from
 
 | what | flags |
@@ -41,3 +47,12 @@ performs no merges at all and every comparison against it is void.
 - **Two arms through different query paths** — one a raw `TermsEnum` seek, the other a full search.
   Both arms now run one path and retrieve postings rather than short-circuiting on `docFreq`.
 - **Probing a tenant that was never indexed**, which measured the cost of a miss.
+- **Running the split before the query probes.** The split rewrites the index, so every metric after
+  it described a different index than the one that was built — `stock` reported 18 segments where the
+  build had produced 27. The split now runs last.
+- **Letting the hash arm keep a degenerate boundary.** Its segment minima are all near zero, so a
+  boundary chosen from them cuts almost nothing and flatters it enormously. The median key of the
+  largest segment is a candidate for exactly this reason.
+- **Reading the index state before merges settle.** `w.commit()` does not wait for the merges the
+  last flush triggered; without a settling loop the segment counts belong to a transient state, which
+  reversed the sign of the concurrency comparison.

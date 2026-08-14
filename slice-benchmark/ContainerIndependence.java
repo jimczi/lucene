@@ -895,6 +895,148 @@ public class ContainerIndependence {
         RANGE_MAX_OVER_TARGET = sizes[RANGES - 1] * perDoc / RANGE_TARGET_BYTES;
     }
 
+
+    // ---------------------------------------------------------------- the split itself
+    static long SPLIT_READ, SPLIT_WRITTEN, SPLIT_DOCS;
+    static int SPLIT_SEGMENTS;
+
+    /**
+     * Perform the operation the whole design is for: cut this index in two at a key boundary, as a
+     * shard split would.
+     *
+     * <p>Everything up to here measured the split's cost *indirectly* -- what fraction of the data
+     * sits in segments spanning the chosen boundary. This does it: segments wholly on one side are
+     * reassigned and cost nothing to read, and the ones that straddle are cut by a single
+     * partitioned merge. What is counted is the IO of that merge.
+     *
+     * <p>Both arms run the identical operation on an identically sorted index, which is the point:
+     * under hash routing every segment spans the whole key space, so every segment straddles and
+     * the "cut" is a rewrite of the entire shard.
+     */
+    static void measureShardSplit(Directory fs, Sort sort) throws IOException {
+        long boundary;
+        List<String> straddlers = new ArrayList<>();
+        long straddleDocs = 0;
+        Stats st = new Stats();
+        // NOT try-with-resources on the wrapper: closing a FilterDirectory closes what it wraps,
+        // and `fs` has to outlive this.
+        Directory probe = new CountingDirectory(fs, st);
+        try (DirectoryReader r = DirectoryReader.open(probe)) {
+            // The boundary a controller would choose: the document median in key space.
+            List<long[]> byKey = new ArrayList<>();
+            long total = 0;
+            for (LeafReaderContext c : r.leaves()) {
+                Terms t = c.reader().terms("routing");
+                total += c.reader().maxDoc();
+                if (t == null) continue;
+                byKey.add(new long[]{Long.parseLong(t.getMin().utf8ToString(), 16),
+                                     Long.parseLong(t.getMax().utf8ToString(), 16),
+                                     c.reader().maxDoc()});
+            }
+            byKey.sort((a, b) -> Long.compare(a[0], b[0]));
+            // Candidate boundaries are the range edges -- the min key of each segment -- PLUS the
+            // key at the middle of the largest segment. That last one matters: under hash routing
+            // every segment spans the whole key space, so the segment edges are all near zero and
+            // none of them cuts the data anywhere near in half. Including an interior key gives
+            // that arm the boundary it would actually have to use, where every segment straddles.
+            List<Long> candidates = new ArrayList<>();
+            for (long[] x : byKey) candidates.add(x[0]);
+            int biggest = 0;
+            for (int i = 1; i < r.leaves().size(); i++) {
+                if (r.leaves().get(i).reader().maxDoc()
+                        > r.leaves().get(biggest).reader().maxDoc()) biggest = i;
+            }
+            SortedDocValues mid = r.leaves().get(biggest).reader().getSortedDocValues("routing");
+            if (mid != null && mid.advanceExact(r.leaves().get(biggest).reader().maxDoc() / 2)) {
+                candidates.add(Long.parseLong(mid.lookupOrd(mid.ordValue()).utf8ToString(), 16));
+            }
+            // The one a controller would pick: closest to an even split, and among those within a
+            // few percent of even, the one that cuts the fewest segments.
+            boundary = 0;
+            double bestScore = Double.MAX_VALUE;
+            long bestStraddle = Long.MAX_VALUE;
+            for (long cand : candidates) {
+                long below = 0, cuts = 0;
+                for (long[] x : byKey) {
+                    if (x[1] < cand) below += x[2];
+                    else if (x[0] < cand) { below += x[2] / 2; cuts += x[2]; }
+                }
+                double imbalance = Math.abs(below / (double) total - 0.5);
+                if (imbalance > 0.05) {
+                    if (imbalance < bestScore && bestStraddle == Long.MAX_VALUE) {
+                        bestScore = imbalance;
+                        boundary = cand;
+                    }
+                    continue;
+                }
+                if (cuts < bestStraddle) { bestStraddle = cuts; boundary = cand; bestScore = 0; }
+            }
+            for (LeafReaderContext c : r.leaves()) {
+                Terms t = c.reader().terms("routing");
+                if (t == null) continue;
+                long min = Long.parseLong(t.getMin().utf8ToString(), 16);
+                long max = Long.parseLong(t.getMax().utf8ToString(), 16);
+                if (min < boundary && max >= boundary) {
+                    straddlers.add(((org.apache.lucene.index.SegmentReader)
+                            org.apache.lucene.index.FilterLeafReader.unwrap(c.reader()))
+                            .getSegmentName());
+                    straddleDocs += c.reader().maxDoc();
+                }
+            }
+        }
+        SPLIT_SEGMENTS = straddlers.size();
+        SPLIT_DOCS = straddleDocs;
+        if (straddlers.isEmpty()) { SPLIT_READ = SPLIT_WRITTEN = 0; return; }
+
+        Stats split = new Stats();
+        split.building = true;
+        IndexWriterConfig iwc = new IndexWriterConfig();
+        iwc.setIndexSort(sort);
+        iwc.setMergePolicy(new SplitAtBoundary(boundary, new java.util.HashSet<>(straddlers)));
+        iwc.setMergeScheduler(new org.apache.lucene.index.SerialMergeScheduler());
+        Directory d = new CountingDirectory(fs, split);
+        try (IndexWriter w = new IndexWriter(d, iwc)) {
+            w.maybeMerge();
+        }
+        SPLIT_READ = split.buildRead;
+        SPLIT_WRITTEN = split.written;
+    }
+
+    /** One partitioned merge that cuts exactly the straddling segments at one key. */
+    static class SplitAtBoundary extends MergePolicy {
+        final long boundary;
+        final java.util.Set<String> straddlers;
+        boolean done;
+
+        SplitAtBoundary(long boundary, java.util.Set<String> straddlers) {
+            this.boundary = boundary;
+            this.straddlers = straddlers;
+        }
+
+        @Override
+        public MergeSpecification findMerges(MergeTrigger t, SegmentInfos infos, MergeContext ctx) {
+            if (done) return null;
+            List<SegmentCommitInfo> take = new ArrayList<>();
+            for (SegmentCommitInfo si : infos) {
+                if (straddlers.contains(si.info.name)) take.add(si);
+            }
+            if (take.isEmpty()) return null;
+            done = true;
+            MergeSpecification spec = new MergeSpecification();
+            spec.add(new FixedRangePolicy.KeySplit(take, "routing", boundary));
+            return spec;
+        }
+
+        @Override
+        public MergeSpecification findForcedMerges(SegmentInfos i, int m,
+                Map<SegmentCommitInfo, Boolean> s, MergeContext c) { return null; }
+
+        @Override
+        public MergeSpecification findForcedDeletesMerges(SegmentInfos i, MergeContext c) {
+            return null;
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         int[] scales = {Integer.parseInt(System.getProperty("scale", "16"))};
         double ratio = Double.parseDouble(System.getProperty("ratio", "20"));
@@ -940,6 +1082,11 @@ public class ContainerIndependence {
                         Directory d = new CountingDirectory(fs, st);
                         Result res = probe(d, st, probeKey, ranged);
                         Result wres = probe(d, st, whaleKey, ranged);
+                        // LAST, because it rewrites the index: everything above has to describe
+                        // the index as built, not as split.
+                        measureShardSplit(fs, new Sort(
+                                new SortField("routing", SortField.Type.STRING),
+                                new SortField("seq", SortField.Type.LONG)));
                         // nomerge runs first and defines the logical corpus size. Normalising each
                         // arm by its OWN final size (as before) rewards an arm for writing a bigger
                         // index, so the arms were not comparable.
@@ -969,6 +1116,11 @@ public class ContainerIndependence {
                         System.out.printf(Locale.ROOT,
                                 "  └─ build %,d ms | shard split: %d candidate boundaries, "
                                 + "best imbalance %.2f%%%n", buildMs, CANDIDATES, BEST_IMBALANCE);
+                        System.out.printf(Locale.ROOT,
+                                "  └─ SPLIT the index in two: %d segments cut (%,d docs), "
+                                + "%,d MB read / %,d MB written = %.1f%% of the index%n",
+                                SPLIT_SEGMENTS, SPLIT_DOCS, SPLIT_READ >> 20, SPLIT_WRITTEN >> 20,
+                                100.0 * SPLIT_WRITTEN / Math.max(1, res.sizeMb() * 1024L * 1024L));
                         System.out.printf(Locale.ROOT,
                                 "  └─ straddle at the split boundary: %.1f%% of the index in "
                                 + "%d segments, of which %.1f%% is never-partitioned L0%n",

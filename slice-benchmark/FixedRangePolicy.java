@@ -487,6 +487,30 @@ public class FixedRangePolicy extends MergePolicy {
      */
 
 
+
+    /** Two outputs, cut at one given key: the shard-split operation, as a merge. */
+    static class KeySplit extends OneMerge {
+        final String field; final long boundary;
+        KeySplit(List<SegmentCommitInfo> segs, String field, long boundary) {
+            super(segs); this.field = field; this.boundary = boundary;
+        }
+        @Override public boolean isPartitioned() { return true; }
+        @Override
+        public int[][] getDocRangePartitions(List<CodecReader> readers) throws IOException {
+            int[][] parts = new int[readers.size()][3];
+            for (int i = 0; i < readers.size(); i++) {
+                CodecReader r = readers.get(i);
+                SortedDocValues dv = r.getSortedDocValues(field);
+                parts[i][0] = 0;
+                parts[i][2] = r.maxDoc();
+                parts[i][1] = dv == null ? r.maxDoc()
+                        : offsetOf(dv, firstDocPerOrd(r, dv), new BytesRef(hex(boundary)),
+                                r.maxDoc());
+            }
+            return parts;
+        }
+    }
+
     /** 2^depth outputs at boundaries known before any data was read. */
     static class FixedSplit extends OneMerge {
         final String field; final int bits; final int fromDepth;
