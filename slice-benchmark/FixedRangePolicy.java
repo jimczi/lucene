@@ -272,13 +272,14 @@ public class FixedRangePolicy extends MergePolicy {
         //     no single one ever crosses it. Measured: 3.2% of the index left deleted here against
         //     10.6% for plain tiered merging on the identical workload.
         //
-        //     Note what is NOT here. Dropping the boundary of a drained range -- absorbing it into
-        //     its sibling -- was built and measured on this same workload, and it made things
-        //     worse: the biggest range went from 1.15x the target to 2.90x and write amplification
-        //     rose 28%, because a range absorbed on its live size then refills and has to be split
-        //     again. Reclaiming in place gets all of the benefit. A range that is merely small
-        //     costs nothing, because a range is only a name derived from the keys its segments
-        //     span, and an empty one is not represented at all.
+        //     Note that this is what handles a LEAVING TENANT, not rule 1c below. Reclaiming in
+        //     place gets the whole benefit: the 3.2% above is measured with no boundary dropped at
+        //     all, and a range that is merely small costs nothing, because a range is only a name
+        //     derived from the keys its segments span and an empty one is not represented at all.
+        //     Absorbing a drained range on its LIVE size was measured on this workload and made
+        //     things worse -- biggest range 1.15x the target to 2.90x, write amplification +28% --
+        //     because such a range refills and has to be split again. That is a statement about the
+        //     threshold, not about absorption: see 1c, which triggers at a quarter of the target.
         //     Note what this loop does NOT filter on: size. Rule 1 above stops consolidating a
         //     segment once it reaches the range target, so without this a segment at that ceiling
         //     would accumulate deletions with nothing left to merge it with -- the top tier is
@@ -301,9 +302,11 @@ public class FixedRangePolicy extends MergePolicy {
         //     segments span, so merging a whole subtree into one segment IS the boundary
         //     disappearing -- the output spans the parent, so it derives the parent's name.
         //
-        //     The threshold sits BELOW the split threshold on purpose. Two halves of a fresh split
-        //     total about the target between them, so absorbing at the target would undo every
-        //     split immediately; at 0.8x they have to shrink first.
+        //     The threshold sits BELOW HALF the split threshold on purpose, and that is arithmetic
+        //     rather than taste: absorbing merges a PAIR, so any threshold above half produces a
+        //     range at or over the split target and the merge is undone at once. Measured splits
+        //     performed: 11 at 0.25x, 19 at 0.5x, 36 at 0.8x -- the churn appears exactly as the
+        //     threshold crosses half. A quarter leaves 2x of margin.
         if (ABSORB) {
             Map<String, List<SegmentCommitInfo>> subtree = new HashMap<>();
             Map<String, long[]> subtreeBytes = new HashMap<>();
