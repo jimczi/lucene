@@ -54,7 +54,7 @@ final class SegmentMerger {
   private final FieldInfos.Builder fieldInfosBuilder;
   final Thread mergeStateCreationThread;
 
-  // Set by mergeUpToPostings(), and read by the phases after it.
+  // Set by mergeExceptPostings(), and read by the phases after it.
   private SegmentWriteState segmentWriteState;
   private SegmentReadState segmentReadState;
   private int numMerged;
@@ -121,22 +121,24 @@ final class SegmentMerger {
    * @throws IOException if there is a low-level IO error
    */
   MergeState merge() throws IOException {
-    mergeUpToPostings();
+    mergeExceptPostings();
     mergePostings();
-    return mergeAfterPostings();
+    return writeFieldInfos();
   }
 
   /**
-   * Everything that must be written before the postings: field infos are computed, stored fields
-   * and norms are written.
+   * Everything except the postings and the field infos.
    *
-   * <p>A merge producing several outputs runs the phases either side of the postings once per
-   * output, but the postings themselves once for all of them, which is why the phases are separable
-   * at all. The order is not incidental: a per-field postings format records which format wrote
-   * each field as a {@link FieldInfo} attribute while the postings are written, and {@link
-   * #mergeAfterPostings()} persists those attributes as its last step.
+   * <p>A merge producing several outputs writes the postings of all of them from one walk of the
+   * inputs, so it needs to stop each output here, write the postings, and then finish. Only two
+   * things fix where that seam can go. Norms come first because a postings writer reads them back
+   * to derive impacts, in the output's own document ids. Field infos come last because a per-field
+   * format records which format wrote each field as a {@link FieldInfo} attribute while writing it,
+   * and those attributes have to exist before they are persisted -- so everything that stamps one
+   * belongs on this side of the seam, which is why doc values, points and vectors are here rather
+   * than after the postings, where the order of the files themselves does not matter.
    */
-  void mergeUpToPostings() throws IOException {
+  void mergeExceptPostings() throws IOException {
     if (!shouldMerge()) {
       throw new IllegalStateException("Merge would result in 0 document segment");
     }
@@ -167,6 +169,28 @@ final class SegmentMerger {
 
     if (mergeState.mergeFieldInfos.hasNorms()) {
       mergeWithLogging(this::mergeNorms, segmentWriteState, segmentReadState, "norms", numMerged);
+    }
+
+    if (mergeState.mergeFieldInfos.hasDocValues()) {
+      mergeWithLogging(
+          this::mergeDocValues, segmentWriteState, segmentReadState, "doc values", numMerged);
+    }
+
+    if (mergeState.mergeFieldInfos.hasPointValues()) {
+      mergeWithLogging(this::mergePoints, segmentWriteState, segmentReadState, "points", numMerged);
+    }
+
+    if (mergeState.mergeFieldInfos.hasVectorValues()) {
+      mergeWithLogging(
+          this::mergeVectorValues,
+          segmentWriteState,
+          segmentReadState,
+          "numeric vectors",
+          numMerged);
+    }
+
+    if (mergeState.mergeFieldInfos.hasTermVectors()) {
+      mergeWithLogging(this::mergeTermVectors, "term vectors");
     }
   }
 
@@ -211,7 +235,7 @@ final class SegmentMerger {
     final FieldsConsumer consumer;
 
     /**
-     * The segment's own norms, read back from what {@link #mergeUpToPostings()} just wrote: the
+     * The segment's own norms, read back from what {@link #mergeExceptPostings()} wrote: the
      * postings writer derives impacts from them, and looks them up by this segment's document ids.
      */
     final NormsProducer norms;
@@ -231,34 +255,10 @@ final class SegmentMerger {
     }
   }
 
-  /** Everything that must be written after the postings, ending with the field infos. */
-  MergeState mergeAfterPostings() throws IOException {
-    if (mergeState.mergeFieldInfos.hasDocValues()) {
-      mergeWithLogging(
-          this::mergeDocValues, segmentWriteState, segmentReadState, "doc values", numMerged);
-    }
-
-    if (mergeState.mergeFieldInfos.hasPointValues()) {
-      mergeWithLogging(this::mergePoints, segmentWriteState, segmentReadState, "points", numMerged);
-    }
-
-    if (mergeState.mergeFieldInfos.hasVectorValues()) {
-      mergeWithLogging(
-          this::mergeVectorValues,
-          segmentWriteState,
-          segmentReadState,
-          "numeric vectors",
-          numMerged);
-    }
-
-    if (mergeState.mergeFieldInfos.hasTermVectors()) {
-      mergeWithLogging(this::mergeTermVectors, "term vectors");
-    }
-
-    // write the merged infos
+  /** Persists the field infos, which every other phase may still have been adding to. */
+  MergeState writeFieldInfos() throws IOException {
     mergeWithLogging(
         this::mergeFieldInfos, segmentWriteState, segmentReadState, "field infos", numMerged);
-
     return mergeState;
   }
 

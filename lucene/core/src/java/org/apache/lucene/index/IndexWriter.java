@@ -5367,7 +5367,7 @@ public class IndexWriter
       // counts, which every output knows before its postings are written.
       final int[] outputStarts = new int[outputCount + 1];
 
-      // Phase A: every output up to, but not including, its postings.
+      // Phase A: every output except its postings and its field infos.
       for (int output = 0; output < outputCount; output++) {
         merge.checkAborted();
         final TrackingDirectoryWrapper dirWrapper = new TrackingDirectoryWrapper(mergeDirectory);
@@ -5425,7 +5425,7 @@ public class IndexWriter
         outInfo.setSoftDelCount(Math.toIntExact(softDeleteCount.get()));
         merge.checkAborted();
         if (merger.shouldMerge()) {
-          merger.mergeUpToPostings();
+          merger.mergeExceptPostings();
         }
         outputStarts[output + 1] = outputStarts[output] + outInfo.info.maxDoc();
       }
@@ -5436,13 +5436,13 @@ public class IndexWriter
       // term's postings are spread across every output, so masking documents saves no IO at all.
       mergePartitionedPostings(merge, mergers, partitions, outputStarts);
 
-      // Phase B: every output from its postings onwards, ending with its field infos.
+      // Phase B: each output's field infos, now that the postings have stamped their attributes.
       for (int output = 0; output < outputCount; output++) {
         final SegmentMerger merger = mergers.get(output);
         final SegmentCommitInfo outInfo = outInfos.get(output);
         merge.checkAborted();
         if (merger.shouldMerge()) {
-          merger.mergeAfterPostings();
+          merger.writeFieldInfos();
         }
         outInfo.info.setFiles(new HashSet<>(dirWrappers.get(output).getCreatedFiles()));
 
