@@ -42,7 +42,7 @@ public class FixedRangePolicy extends MergePolicy {
     /** current subdivision depth: 2^depth ranges. Grows with the index, never shrinks. */
     int depth = 0;
     int l0Trigger = 4;
-    int splits, merges, idSplits, reclaims, l0Consolidations;
+    int splits, merges, idSplits, reclaims, absorbs, l0Consolidations;
     long l0ConsolidationBytes;
     /** How many documents pass through a partition merge, and how many outputs each produced.
      *  If inputDocs ~= docs indexed, every document is partitioned exactly once. If it is a
@@ -52,6 +52,10 @@ public class FixedRangePolicy extends MergePolicy {
 
     /** Deleted percentage at which a range that still fills itself is rewritten in place. */
     static final int RECLAIM_PCT = Integer.getInteger("reclaimPct", 20);
+    /** Whether an under-full subtree is absorbed back into its parent range. */
+    static final boolean ABSORB = Boolean.parseBoolean(System.getProperty("absorb", "false"));
+    /** The dead band: a range splits at the target and is absorbed below this fraction of it. */
+    static final double ABSORB_AT = Double.parseDouble(System.getProperty("absorbAt", "0.8"));
 
     /** bits of key space resolved by ONE merge: fan-out 2^FANOUT_BITS per level */
     static final int FANOUT_BITS =
@@ -128,6 +132,32 @@ public class FixedRangePolicy extends MergePolicy {
         long diff = e[2] ^ e[3];
         int d = diff == 0 ? 64 : Long.numberOfLeadingZeros(diff);
         return first + "/" + d + ":" + Long.toHexString(d == 0 ? 0 : (e[2] >>> (64 - d)));
+    }
+
+    /**
+     * Every range above this segment's own, deepest first: the candidate absorptions, in the order
+     * they should be considered.
+     *
+     * <p>It has to be every ancestor and not just the parent. A range's data is everything in its
+     * SUBTREE, so asking whether a pair of siblings is under-full by summing only what is named one
+     * level down undercounts whenever either side has been split further -- and absorbing on that
+     * undercount produces a range immediately over target, which splits again.
+     */
+    List<String> ancestorsOf(long[] e) {
+        List<String> out = new ArrayList<>();
+        if (e[0] == e[1] && e.length >= 4) {
+            String first = bucketOf(e[0], e[1]);
+            long diff = e[2] ^ e[3];
+            int d2 = diff == 0 ? 64 : Long.numberOfLeadingZeros(diff);
+            for (int d = d2 - 1; d >= 0; d--) {
+                out.add(first + "/" + d + ":" + Long.toHexString(d == 0 ? 0 : (e[2] >>> (64 - d))));
+            }
+        }
+        int d1 = depthOf(e[0], e[1]);
+        for (int d = Math.min(d1, 32) - 1; d >= 1; d--) {
+            out.add(d + ":" + Long.toHexString(e[0] >>> (32 - d)));
+        }
+        return out;
     }
 
     /** The midpoint of the second-level range currently holding [minSeq, maxSeq]. */
@@ -245,6 +275,49 @@ public class FixedRangePolicy extends MergePolicy {
             reclaims++;
         }
         if (!spec.merges.isEmpty()) { lastWasConsolidation = true; return spec; }
+
+        // 1c. ABSORB an under-full subtree back into its parent range. Refinement only ever makes
+        //     ranges finer, and nothing makes them coarser again, so the partition ends up bounded
+        //     above and ragged below -- measured p95/median around 10x at every size above the
+        //     smallest. This is the only rule that gives ground.
+        //
+        //     Dropping a boundary is not bookkeeping: a range's name is derived from the keys its
+        //     segments span, so merging a whole subtree into one segment IS the boundary
+        //     disappearing -- the output spans the parent, so it derives the parent's name.
+        //
+        //     The threshold sits BELOW the split threshold on purpose. Two halves of a fresh split
+        //     total about the target between them, so absorbing at the target would undo every
+        //     split immediately; at 0.8x they have to shrink first.
+        if (ABSORB) {
+            Map<String, List<SegmentCommitInfo>> subtree = new HashMap<>();
+            Map<String, long[]> subtreeBytes = new HashMap<>();
+            Map<String, Integer> rankOf = new HashMap<>();
+            for (SegmentCommitInfo si : infos) {
+                long[] e = extremes.get(si.info.name);
+                if (e == null) continue;
+                int rank = 0;
+                for (String anc : ancestorsOf(e)) {                  // deepest first
+                    subtree.computeIfAbsent(anc, k -> new ArrayList<>()).add(si);
+                    subtreeBytes.computeIfAbsent(anc, k -> new long[1])[0] += sizeOf(si);
+                    rankOf.merge(anc, rank++, Math::min);
+                }
+            }
+            List<String> candidates = new ArrayList<>(subtree.keySet());
+            candidates.sort((a, b) -> Integer.compare(rankOf.get(a), rankOf.get(b)));
+            java.util.Set<String> taken = new java.util.HashSet<>();
+            for (String cand : candidates) {
+                List<SegmentCommitInfo> group = subtree.get(cand);
+                if (group.size() < 2) continue;                      // nothing to gain
+                if (subtreeBytes.get(cand)[0] >= (long) (targetBytes * ABSORB_AT)) continue;
+                boolean free = true;
+                for (SegmentCommitInfo si : group) free &= taken.contains(si.info.name) == false;
+                if (free == false) continue;                         // a deeper collapse has it
+                for (SegmentCommitInfo si : group) taken.add(si.info.name);
+                spec.add(new OneMerge(group));
+                absorbs++;
+            }
+            if (!spec.merges.isEmpty()) { lastWasConsolidation = true; return spec; }
+        }
 
         lastWasConsolidation = false;
 

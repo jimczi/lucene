@@ -1,4 +1,5 @@
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -478,10 +479,41 @@ public class ContainerIndependence {
         try (IndexWriter w = new IndexWriter(d, iwc)) {
             for (int e = 0; e < EPOCHS; e++) {
                 // other slices: each is written entirely within one epoch (burst) except a
-                // fraction that trickles, matching a real mixed population
-                for (int i = e; i < others; i += EPOCHS) {
-                    String r = key(i);
-                    for (int j = 0; j < sizes[i]; j++) { w.addDocument(doc(r)); docsSoFar++; }
+                // fraction that trickles, matching a real mixed population.
+                //
+                // Indexed from several threads when asked, because that is not a detail: Lucene
+                // buffers per thread and flushes each buffer to its OWN segment, so a real ingest
+                // holds many more segments than a single-threaded one. For the hash-routed arm that
+                // matters directly -- a single-tenant query touches every segment there is.
+                final int epoch = e;
+                if (THREADS > 1) {
+                    List<Thread> pool = new ArrayList<>();
+                    java.util.concurrent.atomic.AtomicInteger next =
+                            new java.util.concurrent.atomic.AtomicInteger(epoch);
+                    for (int t = 0; t < THREADS; t++) {
+                        Thread th = new Thread(() -> {
+                            try {
+                                for (int i = next.getAndAdd(EPOCHS); i < others;
+                                        i = next.getAndAdd(EPOCHS)) {
+                                    String r = key(i);
+                                    for (int j = 0; j < sizes[i]; j++) w.addDocument(doc(r));
+                                }
+                            } catch (IOException ex) {
+                                throw new UncheckedIOException(ex);
+                            }
+                        });
+                        th.start();
+                        pool.add(th);
+                    }
+                    for (Thread th : pool) {
+                        try { th.join(); } catch (InterruptedException ignore) { }
+                    }
+                    for (int i = epoch; i < others; i += EPOCHS) docsSoFar += sizes[i];
+                } else {
+                    for (int i = e; i < others; i += EPOCHS) {
+                        String r = key(i);
+                        for (int j = 0; j < sizes[i]; j++) { w.addDocument(doc(r)); docsSoFar++; }
+                    }
                 }
                 // the probe slice writes a slice of its documents in every epoch (trickle)
                 for (int j = 0; j < PROBE_DOCS / EPOCHS; j++) { w.addDocument(doc(probe)); docsSoFar++; }
@@ -522,6 +554,17 @@ public class ContainerIndependence {
                         if (pe.splits + pe.idSplits == bs && pe.merges == bm) break;
                     }
                 }
+            }
+            // Let the merge policy reach its steady state before anything is measured. Without
+            // this the final segment count is whatever happened to be outstanding when ingest
+            // stopped, which is a property of when we stopped rather than of the policy -- and it
+            // flatters or penalises an arm depending on how far behind its merges were. Both arms
+            // are drained the same way.
+            for (int settle = 0; settle < 200; settle++) {
+                int before = MERGES.size();
+                if (pe != null) refreshExtremes(w, pe);
+                w.maybeMerge();
+                if (MERGES.size() == before) break;
             }
             w.commit();
         }
@@ -566,6 +609,8 @@ public class ContainerIndependence {
     static final int MERGE_ROUNDS = Integer.parseInt(System.getProperty("rounds", "8"));
     static final boolean TEXT = Boolean.parseBoolean(System.getProperty("text", "false"));
     /** Percentage of ordinary slices that are deleted during the run, and how long they live. */
+    /** Indexing threads. Lucene buffers and flushes per thread, so this drives segment count. */
+    static final int THREADS = Integer.getInteger("threads", 1);
     static final int CHURN_PCT = Integer.getInteger("churn", 0);
     static final int CHURN_LAG = Integer.getInteger("churnLag", 10);
     /** Which whale is deleted mid-run, or -1 for none. Whale 0 stays: it is the probe. */
@@ -574,8 +619,12 @@ public class ContainerIndependence {
     static int DELETED_SLICES;
     /** Whether documents carry a point field, which a partitioned merge reads once per output. */
     static final boolean POINTS = Boolean.parseBoolean(System.getProperty("points", "false"));
-    static final Random TERM_RND = new Random(5);
-    static final Random SRC_RND = new Random(17);
+    /**
+     * Per thread, so that concurrent indexing produces the same documents without contending on one
+     * generator. Seeded from the thread's index, so a run is reproducible for a given thread count.
+     */
+    static final ThreadLocal<Random> TERM_RND = ThreadLocal.withInitial(() -> new Random(5));
+    static final ThreadLocal<Random> SRC_RND = ThreadLocal.withInitial(() -> new Random(17));
     /**
      * Vocabulary for the stored payload. A previous version stored the same 400 identical
      * characters in every document, which compresses to almost nothing -- so stored fields were a
@@ -598,14 +647,14 @@ public class ContainerIndependence {
         StringBuilder sb = new StringBuilder(448);
         sb.append("{\"tenant\":\"").append(routing).append("\",\"seq\":").append(seq);
         sb.append(",\"ts\":").append(1_700_000_000L + seq * 37L);
-        sb.append(",\"user\":\"u").append(SRC_RND.nextInt(100_000)).append('\"');
-        sb.append(",\"path\":\"/api/v").append(SRC_RND.nextInt(3)).append('/')
-          .append(WORDS[SRC_RND.nextInt(WORDS.length)]).append('/')
-          .append(WORDS[SRC_RND.nextInt(WORDS.length)]).append('\"');
+        sb.append(",\"user\":\"u").append(SRC_RND.get().nextInt(100_000)).append('\"');
+        sb.append(",\"path\":\"/api/v").append(SRC_RND.get().nextInt(3)).append('/')
+          .append(WORDS[SRC_RND.get().nextInt(WORDS.length)]).append('/')
+          .append(WORDS[SRC_RND.get().nextInt(WORDS.length)]).append('\"');
         sb.append(",\"msg\":\"");
-        for (int i = 0; i < 14; i++) sb.append(WORDS[SRC_RND.nextInt(WORDS.length)]).append(' ');
-        sb.append("\",\"bytes\":").append(SRC_RND.nextInt(1_000_000));
-        sb.append(",\"ok\":").append(SRC_RND.nextBoolean()).append('}');
+        for (int i = 0; i < 14; i++) sb.append(WORDS[SRC_RND.get().nextInt(WORDS.length)]).append(' ');
+        sb.append("\",\"bytes\":").append(SRC_RND.get().nextInt(1_000_000));
+        sb.append(",\"ok\":").append(SRC_RND.get().nextBoolean()).append('}');
         return sb.toString();
     }
     static final String[] PAD = new String[64];
@@ -620,11 +669,13 @@ public class ContainerIndependence {
     /** Whale ids live above the regular slice population so they never collide with it. */
     static String whaleKey(int i) { return key(900_000 + i); }
 
-    static long SEQ = 0;
+    static final java.util.concurrent.atomic.AtomicLong SEQ_GEN =
+            new java.util.concurrent.atomic.AtomicLong();
 
     static Document doc(String routing) {
         Document d = new Document();
-        d.add(new org.apache.lucene.document.NumericDocValuesField("seq", SEQ++));
+        final long seq = SEQ_GEN.getAndIncrement();
+        d.add(new org.apache.lucene.document.NumericDocValuesField("seq", seq));
         d.add(new StringField("routing", routing, Field.Store.NO));
         d.add(new SortedDocValuesField("routing", new BytesRef(routing)));
         d.add(new NumericDocValuesField("v", 1));
@@ -633,16 +684,16 @@ public class ContainerIndependence {
             // High-cardinality terms are what make a terms-dictionary merge expensive, and the
             // terms dictionary is the one format a partitioned merge must walk once per output.
             StringBuilder sb = new StringBuilder();
-            for (int t = 0; t < 12; t++) sb.append("t").append(TERM_RND.nextInt(200_000)).append(' ');
+            for (int t = 0; t < 12; t++) sb.append("t").append(TERM_RND.get().nextInt(200_000)).append(' ');
             d.add(new org.apache.lucene.document.TextField("body", sb.toString(), Field.Store.NO));
         }
-        d.add(new org.apache.lucene.document.StoredField("_source", source(routing, SEQ)));
+        d.add(new org.apache.lucene.document.StoredField("_source", source(routing, seq)));
         if (POINTS) {
             // A partitioned merge reads a block k-d tree once per output, exactly as it did the
             // terms dictionary before the single pass: the tree is ordered by value, so an output
             // cannot seek past the documents it does not own. Every ES index has at least a
             // @timestamp, so a corpus without one understates the merge cost.
-            d.add(new org.apache.lucene.document.LongPoint("ts", 1_700_000_000L + SEQ * 37L));
+            d.add(new org.apache.lucene.document.LongPoint("ts", 1_700_000_000L + seq * 37L));
         }
         return d;
     }
@@ -937,12 +988,12 @@ public class ContainerIndependence {
                                 "  └─ partition: %d merges, %,d input docs vs %,d indexed (%.2fx), "
                                 + "%,d outputs total, k=%d | splits %d, id-splits %d, "
                                 + "consolidations %d (of which %d re-compact L0, %,d MB), "
-                                + "reclaims %d%n",
+                                + "reclaims %d, absorbs %d%n",
                                 PE.partitionMerges, PE.partitionInputDocs, DOCS_INDEXED,
                                 PE.partitionInputDocs / (double) Math.max(1, DOCS_INDEXED),
                                 PE.partitionOutputs, 1 << PE.depth,
                                 PE.splits, PE.idSplits, PE.merges, PE.l0Consolidations,
-                                PE.l0ConsolidationBytes >> 20, PE.reclaims);
+                                PE.l0ConsolidationBytes >> 20, PE.reclaims, PE.absorbs);
                         }
                         long tot = Math.max(1, st.wFlush + st.wSplit + st.wTier);
                         System.out.printf(Locale.ROOT,
