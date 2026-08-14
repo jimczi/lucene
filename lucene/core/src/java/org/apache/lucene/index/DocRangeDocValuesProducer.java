@@ -343,8 +343,9 @@ final class DocRangeDocValuesProducer extends DocValuesProducer {
   }
 
   @Override
-  public void checkIntegrity(MergePolicy.OneMerge merge) throws IOException {
-    in.checkIntegrity(merge);
+  public void checkIntegrity(MergePolicy.OneMerge merge) {
+    // The merge verified this segment once, before its outputs were built. See
+    // DocRangeCodecReader, which suppresses the same check for every other format.
   }
 
   @Override

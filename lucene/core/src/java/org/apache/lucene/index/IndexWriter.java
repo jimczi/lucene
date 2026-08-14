@@ -5357,6 +5357,21 @@ public class IndexWriter
             "IW", "merging " + segString(merge.segments) + " into " + outputCount + " outputs");
       }
 
+      // Wrapped once and shared by every output. Wrapping is where a caller filters a reader, and
+      // every output sees the same inputs, so doing it per output would repeat that work k times.
+      // This is also where the inputs are verified: each format checksums the files it is about to
+      // read when its merge begins, which costs a full read of them, and a partitioned merge runs
+      // those merges once per output. Verifying here instead leaves one check per input per merge,
+      // before any output has written anything -- DocRangeCodecReader suppresses the rest.
+      final List<CodecReader> wrappedReaders = new ArrayList<>(rawReaders.size());
+      for (MergePolicy.MergeReader mergeReader : merge.getMergeReader()) {
+        merge.checkAborted();
+        final CodecReader wrapped = merge.wrapForMerge(mergeReader.reader);
+        validateMergeReader(wrapped);
+        verifyMergeInputIntegrity(wrapped, merge);
+        wrappedReaders.add(wrapped);
+      }
+
       final Executor intraMergeExecutor = mergeScheduler.getIntraMergeExecutor(merge);
       final List<MergeState.DocMap[]> docMapsPerOutput = new ArrayList<>(outputCount);
       merge.mergeStartNS = System.nanoTime();
@@ -5378,12 +5393,11 @@ public class IndexWriter
         final Counter softDeleteCount = Counter.newCounter(false);
         int i = 0;
         for (MergePolicy.MergeReader mergeReader : merge.getMergeReader()) {
-          CodecReader wrapped = merge.wrapForMerge(mergeReader.reader);
-          validateMergeReader(wrapped);
           // Everything outside this output's range looks deleted, so it maps to -1 in the
           // resulting DocMap -- which is what routes concurrent deletes to the right output.
-          wrapped =
-              new DocRangeCodecReader(wrapped, partitions[i][output], partitions[i][output + 1]);
+          CodecReader wrapped =
+              new DocRangeCodecReader(
+                  wrappedReaders.get(i), partitions[i][output], partitions[i][output + 1]);
           if (softDeletesEnabled) {
             // Count soft deletes that fall INSIDE this output's range. The
             // single-output shortcut (softDelCount - numDeletedDocs) cannot be
@@ -5507,6 +5521,39 @@ public class IndexWriter
       }
     }
     return totalDocs;
+  }
+
+  /**
+   * Checksums every file of one input of a partitioned merge, which is what each format's merge
+   * would otherwise do for itself when it started reading that input.
+   *
+   * <p>This deliberately mirrors {@link CodecReader#checkIntegrity()} rather than calling it: the
+   * merge is passed down so a long checksum can notice that it has been aborted, and the compound
+   * file is left out, because a format verifies the slice it reads and never the container.
+   */
+  private static void verifyMergeInputIntegrity(CodecReader reader, MergePolicy.OneMerge merge)
+      throws IOException {
+    if (reader.getPostingsReader() != null) {
+      reader.getPostingsReader().checkIntegrity(merge);
+    }
+    if (reader.getNormsReader() != null) {
+      reader.getNormsReader().checkIntegrity(merge);
+    }
+    if (reader.getDocValuesReader() != null) {
+      reader.getDocValuesReader().checkIntegrity(merge);
+    }
+    if (reader.getFieldsReader() != null) {
+      reader.getFieldsReader().checkIntegrity(merge);
+    }
+    if (reader.getTermVectorsReader() != null) {
+      reader.getTermVectorsReader().checkIntegrity(merge);
+    }
+    if (reader.getPointsReader() != null) {
+      reader.getPointsReader().checkIntegrity(merge);
+    }
+    if (reader.getVectorReader() != null) {
+      reader.getVectorReader().checkIntegrity(merge);
+    }
   }
 
   /**
