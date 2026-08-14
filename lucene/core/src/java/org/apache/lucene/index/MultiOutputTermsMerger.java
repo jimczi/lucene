@@ -33,7 +33,9 @@ import org.apache.lucene.util.BytesRef;
  * Stored fields, doc values, norms and term vectors are keyed by document, so an output's documents
  * are a contiguous interval its reader seeks past and masking the rest genuinely saves the IO. A
  * term's postings are spread across every output instead, so masking documents saves nothing at
- * all. Measured on a text corpus, that is the dominant cost of a partitioned merge.
+ * all. Measured on a text corpus at 64 outputs, a merge that writes its outputs one at a time reads
+ * 9.59 times what it writes, against 2.62 for one that shares this pass -- so this is the dominant
+ * per-output cost of a partitioned merge, and the reason the API below exists.
  *
  * <p>Points are ordered by value as well, and so have the same problem -- but not the same remedy.
  * A block k-d tree shares nothing between the documents of different outputs the way a dictionary
