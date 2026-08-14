@@ -5412,6 +5412,12 @@ public class IndexWriter
                 context,
                 intraMergeExecutor,
                 merge);
+        if (output == 0) {
+          // Before this merger writes anything, and so while refusing still costs nothing. Every
+          // output merges the same inputs and so ends up with the same fields, which is why asking
+          // the first one answers for all of them.
+          checkPartitionedMergeSupported(merger);
+        }
         mergers.add(merger);
         outInfos.add(outInfo);
         dirWrappers.add(dirWrapper);
@@ -5504,6 +5510,39 @@ public class IndexWriter
   }
 
   /**
+   * Refuses a partitioned merge this codec or this index cannot support, before the merge has
+   * written anything.
+   *
+   * <p>Both conditions are the caller's configuration rather than anything about the data, so they
+   * fail rather than falling back to a merge per output -- that fallback is the very cost the
+   * partitioning exists to avoid, and taking it silently would leave no sign of why a merge
+   * suddenly reads the terms dictionary k times.
+   *
+   * <p>Note what the second condition rules out today: only the default block-tree postings format
+   * implements the push path, so a partitioned merge is not available to codecs built on anything
+   * else.
+   */
+  private static void checkPartitionedMergeSupported(SegmentMerger merger) {
+    // Correctness rests on the outputs being contiguous AND in order in the merged document space.
+    // That holds under an index sort, where the merged order is key order and the outputs are key
+    // ranges. Without one, DocIDMerger concatenates input by input, so an output's documents land
+    // in one block per input rather than in a single run, and splitting a term's postings by
+    // document id would quietly hand documents to the wrong output.
+    if (merger.mergeState.segmentInfo.getIndexSort() == null) {
+      throw new IllegalArgumentException(
+          "a partitioned merge requires an index sort, so that outputs are contiguous ranges of "
+              + "the merged document space");
+    }
+    if (merger.hasPostings() && merger.supportsPushWriter() == false) {
+      throw new IllegalArgumentException(
+          "postings format "
+              + merger.mergeState.segmentInfo.getCodec().postingsFormat().getName()
+              + " cannot write several outputs from one pass, so it cannot be used for a "
+              + "partitioned merge");
+    }
+  }
+
+  /**
    * Writes the postings of every output of a partitioned merge from a single walk of the inputs.
    *
    * <p>This path is a precondition of a partitioned merge rather than an optimization it may fall
@@ -5529,25 +5568,8 @@ public class IndexWriter
       return;
     }
 
-    // Correctness rests on the outputs being contiguous AND in order in the merged document space.
-    // That holds under an index sort, where the merged order is key order and the outputs are key
-    // ranges. Without one, DocIDMerger concatenates input by input, so an output's documents land
-    // in one block per input rather than in a single run, and splitting a term's postings by
-    // document id would quietly hand documents to the wrong output.
-    if (live.get(0).mergeState.segmentInfo.getIndexSort() == null) {
-      throw new IllegalArgumentException(
-          "a partitioned merge requires an index sort, so that outputs are contiguous ranges of "
-              + "the merged document space");
-    }
-    for (SegmentMerger merger : live) {
-      if (merger.supportsPushWriter() == false) {
-        throw new IllegalArgumentException(
-            "postings format "
-                + merger.mergeState.segmentInfo.getCodec().postingsFormat().getName()
-                + " cannot write several outputs from one pass, so it cannot be used for a "
-                + "partitioned merge");
-      }
-    }
+    assert live.get(0).mergeState.segmentInfo.getIndexSort() != null
+        : "checkPartitionedMergeSupported() should have refused this merge";
 
     final int[] starts = new int[live.size() + 1];
     for (int j = 0; j < live.size(); j++) {

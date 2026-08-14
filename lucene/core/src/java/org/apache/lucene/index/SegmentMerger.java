@@ -176,11 +176,15 @@ final class SegmentMerger {
   }
 
   boolean hasPostings() {
+    // Like supportsPushWriter(), answerable before the merge has written anything.
+    mergeFieldInfos();
     return mergeState.mergeFieldInfos.hasPostings();
   }
 
   /** Whether this segment's postings can be written by a caller driving the pass instead. */
   boolean supportsPushWriter() {
+    // Answerable before anything is written, so a caller can still refuse cleanly.
+    mergeFieldInfos();
     return codec.postingsFormat().supportsPushWriter(mergeState.mergeFieldInfos);
   }
 
@@ -309,7 +313,16 @@ final class SegmentMerger {
     }
   }
 
-  private void mergeFieldInfos() {
+  /**
+   * Works out which fields the merged segment will have. This writes nothing, so a caller may run
+   * it while still free to refuse the merge -- which is what makes {@link #supportsPushWriter()}
+   * answerable before any file exists. Running it twice would add every field to the builder again,
+   * hence the guard.
+   */
+  void mergeFieldInfos() {
+    if (mergeState.mergeFieldInfos != null) {
+      return;
+    }
     for (FieldInfos readerFieldInfos : mergeState.fieldInfos) {
       for (FieldInfo fi : readerFieldInfos) {
         fieldInfosBuilder.add(fi);

@@ -131,6 +131,45 @@ public abstract class TermsEnum implements BytesRefIterator {
   public abstract int docFreq() throws IOException;
 
   /**
+   * The number of documents in {@code [minDoc, maxDoc)} containing the current term.
+   *
+   * <p>This exists so that a segment holding several independent groups of documents -- the tenants
+   * of a shared index, most obviously, where an index sort puts each tenant's documents together --
+   * can score a query with statistics taken from one group rather than from the whole segment. A
+   * term that is rare across the segment but common inside one tenant otherwise has that tenant's
+   * documents scored as though it were rare, which is the wrong answer for every query that tenant
+   * asks.
+   *
+   * <p>The alternative is a separate terms dictionary per group, which writes every term that more
+   * than one group uses once per group. Deriving the statistic from a shared dictionary keeps one
+   * entry per term however many groups there are.
+   *
+   * <p>The default implementation walks the postings from {@code minDoc}, so it costs what this
+   * term's postings within the range cost -- no worse than the scoring pass that follows it, and
+   * small when the range is. A codec whose postings record how many documents precede each block
+   * can answer from two skip descents instead, since the count wanted is the difference of the two
+   * ranks; none does yet.
+   *
+   * @param minDoc first document of the range, inclusive
+   * @param maxDoc end of the range, exclusive
+   * @lucene.experimental
+   */
+  public int docFreq(int minDoc, int maxDoc) throws IOException {
+    if (minDoc < 0 || maxDoc < minDoc) {
+      throw new IllegalArgumentException("invalid document range [" + minDoc + "," + maxDoc + ")");
+    }
+    if (minDoc == maxDoc) {
+      return 0;
+    }
+    final PostingsEnum postings = postings(null, PostingsEnum.NONE);
+    int count = 0;
+    for (int doc = postings.advance(minDoc); doc < maxDoc; doc = postings.nextDoc()) {
+      count++;
+    }
+    return count;
+  }
+
+  /**
    * Returns the total number of occurrences of this term across all documents (the sum of the
    * freq() for each doc that has this term). Note that, like other term measures, this measure does
    * not take deleted documents into account.

@@ -67,6 +67,10 @@ public class TestMultiOutputMerge extends LuceneTestCase {
     // A contiguous doc range is a contiguous key range only when sorted.
     iwc.setIndexSort(new Sort(new SortField("sort", SortField.Type.STRING)));
     iwc.setMergePolicy(new PartitioningMergePolicy());
+    // Pinned rather than randomized: feeding several outputs from one pass needs a postings format
+    // that implements the push path, and only the default one does. A partitioned merge refuses
+    // the others outright, so the randomized codecs would fail here by design rather than by bug.
+    iwc.setCodec(TestUtil.getDefaultCodec());
     return iwc;
   }
 

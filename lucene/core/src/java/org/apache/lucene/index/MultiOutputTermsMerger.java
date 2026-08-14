@@ -29,10 +29,16 @@ import org.apache.lucene.util.BytesRef;
  * Merges an inverted index into several outputs in a <b>single pass</b> over the inputs.
  *
  * <p>Running an ordinary merge once per output costs {@code k} full reads of the terms dictionary
- * and of every posting, because a terms dictionary is ordered by term: unlike stored fields, doc
- * values or points -- whose per-output doc range is a contiguous interval a reader simply seeks past
- * -- a term's postings are spread across every output, so masking documents saves no IO at all.
- * Measured on a text corpus, that is the dominant cost of a partitioned merge.
+ * and of every posting, because a terms dictionary is ordered by term rather than by document.
+ * Stored fields, doc values, norms and term vectors are keyed by document, so an output's documents
+ * are a contiguous interval its reader seeks past and masking the rest genuinely saves the IO. A
+ * term's postings are spread across every output instead, so masking documents saves nothing at
+ * all. Measured on a text corpus, that is the dominant cost of a partitioned merge.
+ *
+ * <p>Points are ordered by value as well, and so have the same problem -- but not the same remedy.
+ * A block k-d tree shares nothing between the documents of different outputs the way a dictionary
+ * shares one entry for a term, so splitting it costs little and the answer there is to store the
+ * points per range to begin with, rather than to divide one tree k ways while merging.
  *
  * <p>The observation that removes it: each output owns a <b>contiguous, increasing</b> interval of
  * the merged document space, and postings arrive in increasing document order. So one term's
@@ -59,8 +65,8 @@ final class MultiOutputTermsMerger {
    * @param mergeState the whole merged document space at once -- see {@link #wholeMergedSpace}
    * @param consumers one consumer per output, in increasing document order
    * @param fieldInfos each output's own {@link FieldInfos}; a per-field dispatching format records
-   *     which format wrote a field on the {@link FieldInfo} it is handed, and it is the output's own
-   *     one that gets persisted
+   *     which format wrote a field on the {@link FieldInfo} it is handed, and it is the output's
+   *     own one that gets persisted
    * @param norms each output's norms, read back after being written: the postings writer derives
    *     impacts from them and looks them up by that output's document ids
    * @param outputStarts {@code consumers.length + 1} boundaries in merged document space; output
