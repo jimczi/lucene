@@ -648,7 +648,8 @@ public class ContainerIndependence {
     }
 
     // ---------------------------------------------------------------- measurement
-    static double STRADDLE_PCT;
+    static double STRADDLE_PCT, STRADDLE_L0_PCT;
+    static int STRADDLERS;
     static double BEST_IMBALANCE;
     static int CANDIDATES;
     static long IDX_BYTES, IDX_BLOCKS, SRI_KB;
@@ -724,9 +725,23 @@ public class ContainerIndependence {
             byKey.sort((a, b) -> Long.compare(a[0], b[0]));
             long half = totalDocs / 2, run = 0, medianKey = 0;
             for (long[] x : byKey) { run += x[2]; if (run >= half) { medianKey = x[0]; break; } }
-            long straddle = 0;
-            for (long[] x : byKey) if (x[0] < medianKey && x[1] >= medianKey) straddle += x[2];
+            // What straddles, and at which depth it was written. A segment that has never been
+            // range-partitioned spans the whole key space and straddles every boundary, so it is
+            // worth separating from the older, coarser segments: the first is what splitting at
+            // FLUSH time would remove, the second is what only re-cutting could.
+            long straddle = 0, straddleL0 = 0;
+            int straddlers = 0;
+            for (long[] x : byKey) {
+                if (x[0] >= medianKey || x[1] < medianKey) continue;
+                straddle += x[2];
+                straddlers++;
+                long diff = x[0] ^ x[1];
+                int segDepth = diff == 0 ? 32 : Math.min(32, Long.numberOfLeadingZeros(diff) - 32);
+                if (segDepth == 0) straddleL0 += x[2];
+            }
             STRADDLE_PCT = totalDocs == 0 ? 0 : (100.0 * straddle / totalDocs);
+            STRADDLE_L0_PCT = totalDocs == 0 ? 0 : (100.0 * straddleL0 / totalDocs);
+            STRADDLERS = straddlers;
 
             // Balance: sort segments by their min key, then test every segment edge as a
             // candidate shard boundary. The best one is what the controller would pick.
@@ -903,6 +918,10 @@ public class ContainerIndependence {
                         System.out.printf(Locale.ROOT,
                                 "  └─ build %,d ms | shard split: %d candidate boundaries, "
                                 + "best imbalance %.2f%%%n", buildMs, CANDIDATES, BEST_IMBALANCE);
+                        System.out.printf(Locale.ROOT,
+                                "  └─ straddle at the split boundary: %.1f%% of the index in "
+                                + "%d segments, of which %.1f%% is never-partitioned L0%n",
+                                STRADDLE_PCT, STRADDLERS, STRADDLE_L0_PCT);
                         System.out.printf(Locale.ROOT,
                                 "  └─ churn: %,d slices deleted | %,d docs still deleted in the "
                                 + "index (%.1f%% of it)%n",
