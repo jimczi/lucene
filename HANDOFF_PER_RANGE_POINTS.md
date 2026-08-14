@@ -31,26 +31,40 @@ to -1; with one tree it must read all the points to discover that, so k outputs 
   records only a codec NAME: a FilterCodec reusing the base name is read back with the stock points
   format. That cost one debugging round.
 
-## The open problem: global value order
+## Global value order: solved
 
-`TestPerRangePointsFormat` fails in `CheckIndex.VerifyPointsVisitor`, not on results:
+`TestPerRangePointsFormat` is green (2/2, seeds 1/2/3/11/42, and the whole `:lucene:sandbox:test`
+suite passes). It took two fixes, both of them contracts rather than slips:
 
-    packed points value ... is out-of-order vs the previous document's value
+1. **Ordering.** `CheckIndex` requires a full traversal of a ONE-data-dimension field to sweep the
+   values once, ascending, tie-broken by increasing docID. Traversal order is the tree SHAPE --
+   `PointValues.intersect` descends with `moveToChild`/`moveToSibling` -- so a synthetic root whose
+   children are ranges is range-major by construction, and the ranges each span the whole value
+   space, so no arrangement of them helps. The interleaving has to be point by point: a flat tree
+   whose `visitDocValues` runs a k-way merge over one cursor per range. Multi-dimension fields have
+   NO such contract (leaves are ordered by whichever dimension compresses best), so they keep the
+   hierarchical tree and its better pruning.
 
-`CheckIndex` requires a full `PointValues` traversal to yield values in GLOBAL order. The union
-walks range 0's tree, then range 1's -- ordered within a range, not across them.
+2. **Cell announcement.** `CheckIndex` also requires every visited value to lie inside the cell of
+   the most recent `compare()` call. Cursors call `compare` to prune while hunting their next leaf,
+   so the merge would emit a point from range A right after range B had asked about a cell nowhere
+   near it. Each cursor now captures the bounds of the leaf it buffered, and the merge re-announces
+   them whenever it starts drawing from a different leaf.
 
-This does not affect query correctness (`PointRangeQuery` collects matches and does not care about
-order) and it does not affect a slice-scoped query at all, which reads one range and is perfectly
-ordered. It is confined to whole-index traversals. Options, in the order worth trying:
+Bug found along the way, worth remembering: `fillNextLeaf` can buffer a leaf AND reach the end of
+the tree in the same call, so `next()` must check the buffer BEFORE the exhausted flag. It did not,
+so every cursor yielded exactly one point -- a full traversal saw 8 points instead of 200, and
+queries returned 0.
 
-1. Make `UnionPointValues` a k-way merge in value order. Correct, and costs a heap over R cursors
-   on every full traversal -- exactly the case per-range points is worst at anyway.
-2. Decide the ordering contract applies per sub-tree and relax `CheckIndex`. Cheaper, but it is a
-   Lucene contract change and needs its own argument.
-3. Expose the ranges rather than a union, so a whole-index traversal is the caller's loop over
-   ranges and no single `PointValues` claims global order.
+Costs, honestly: a one-dimension whole-index traversal now pays a heap operation per point, cannot
+use the `visitDocIDs` shortcut for cells lying entirely inside the query (the merge needs values to
+order by), and may re-announce a cell per point when ranges interleave tightly. All of it falls on
+whole-index queries only -- a slice-scoped query reads one range and gets an ordinary block k-d tree
+with nothing added, which is the case the format exists for.
 
-Nothing here is measured yet. The claim that per-range points make a partitioned merge cost 1x
-instead of kx is still a prediction; the benchmark corpus has no points field, so it has never
-exercised this at all.
+## Still unmeasured
+
+The claim that per-range points make a partitioned merge cost 1x instead of kx. The benchmark corpus
+(`.agents/slice-sim/ContainerIndependence.java`) has no points field at all, so the 12.57 merge read
+amplification measured for postings understates a real ES index. Adding an IntPoint/LongPoint field
+to `doc()` is the next step.
