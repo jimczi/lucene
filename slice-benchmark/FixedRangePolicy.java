@@ -52,7 +52,15 @@ public class FixedRangePolicy extends MergePolicy {
 
     /** Deleted percentage at which a range that still fills itself is rewritten in place. */
     static final int RECLAIM_PCT = Integer.getInteger("reclaimPct", 20);
-    /** Whether an under-full subtree is absorbed back into its parent range. */
+    /**
+     * Whether an under-full subtree is absorbed back into its parent range. On, and deliberately not
+     * gated on index size even though it costs 130% more writes on a small index and buys nothing
+     * there: in bytes that is 1.1 GB over the whole life of a 245 MB index, against +36% and a
+     * halved query cost at 15 GB. The relative cost is worst exactly where the absolute cost is
+     * negligible. An index of this kind is shared by many tenants -- that is the premise -- so a
+     * small one is either young or not the workload, and a size threshold would be a knob that
+     * exists only to optimise a case the design is not for.
+     */
     static final boolean ABSORB = Boolean.parseBoolean(System.getProperty("absorb", "true"));
     /**
      * The dead band: a range splits at the target and is absorbed below this fraction of it.
