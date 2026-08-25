@@ -207,7 +207,8 @@ public class TestKeyRangePartitioning extends LuceneTestCase {
         Set<String> seen = new HashSet<>();
         for (LeafReaderContext ctx : r.leaves()) {
           StoredFields sf = ctx.reader().storedFields();
-          for (int doc = 0; doc < ctx.reader().maxDoc(); doc++) seen.add(sf.document(doc).get("id"));
+          for (int doc = 0; doc < ctx.reader().maxDoc(); doc++)
+            seen.add(sf.document(doc).get("id"));
         }
         assertEquals("a wide split must not lose or duplicate documents", expected, seen);
       }

@@ -28,13 +28,17 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.KnnFloatVectorQuery;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.store.MockDirectoryWrapper;
 import org.apache.lucene.tests.util.LuceneTestCase;
@@ -67,10 +71,6 @@ public class TestMultiOutputMerge extends LuceneTestCase {
     // A contiguous doc range is a contiguous key range only when sorted.
     iwc.setIndexSort(new Sort(new SortField("sort", SortField.Type.STRING)));
     iwc.setMergePolicy(new PartitioningMergePolicy());
-    // Pinned rather than randomized: feeding several outputs from one pass needs a postings format
-    // that implements the push path, and only the default one does. A partitioned merge refuses
-    // the others outright, so the randomized codecs would fail here by design rather than by bug.
-    iwc.setCodec(TestUtil.getDefaultCodec());
     return iwc;
   }
 
@@ -81,6 +81,17 @@ public class TestMultiOutputMerge extends LuceneTestCase {
     d.add(new StoredField("id", id));
     d.add(new NumericDocValuesField("val", val));
     return d;
+  }
+
+  /** A document whose vector is derived from its id, so a mismatch after a merge is detectable. */
+  private static Document vectorDoc(String id, float[] vector) {
+    Document d = doc(id, 0);
+    d.add(new KnnFloatVectorField("vec", vector, VectorSimilarityFunction.EUCLIDEAN));
+    return d;
+  }
+
+  private static float[] vectorFor(int seg, int d) {
+    return new float[] {seg, d, (float) (seg * PER_SEGMENT + d)};
   }
 
   private static String id(int seg, int d) {
@@ -533,6 +544,65 @@ public class TestMultiOutputMerge extends LuceneTestCase {
   }
 
   // ------------------------------------------------------------------
+
+  /**
+   * Vector fields survive a partitioned merge without the KNN format knowing about partitioning.
+   *
+   * <p>Nothing narrows vector values by document range, so each output reads every input's vectors
+   * and keeps the ones its range owns. Its graph is then built from scratch: a graph is reused only
+   * when a reader's deleted fraction is small, and an output of a k-way split presents everything
+   * outside its own range as deleted, which for any k &gt; 1 is at least half the segment.
+   */
+  public void testVectorsSurvivePartitionedMerge() throws Exception {
+    try (Directory dir = newDirectory()) {
+      Map<String, float[]> expected = new HashMap<>();
+      try (IndexWriter w = new IndexWriter(dir, config())) {
+        for (int seg = 0; seg < SEGMENTS; seg++) {
+          for (int d = 0; d < PER_SEGMENT; d++) {
+            float[] vector = vectorFor(seg, d);
+            w.addDocument(vectorDoc(id(seg, d), vector));
+            expected.put(id(seg, d), vector);
+          }
+          w.flush();
+        }
+        w.commit();
+        enabled = true;
+        proceed.countDown();
+        w.maybeMerge();
+      }
+
+      try (DirectoryReader r = DirectoryReader.open(dir)) {
+        assertTrue("expected several outputs, got " + r.leaves().size(), r.leaves().size() > 1);
+
+        // Every vector is present exactly once, still attached to its own document.
+        Map<String, float[]> found = new HashMap<>();
+        for (LeafReaderContext ctx : r.leaves()) {
+          StoredFields sf = ctx.reader().storedFields();
+          FloatVectorValues values = ctx.reader().getFloatVectorValues("vec");
+          assertNotNull("output lost the vector field entirely", values);
+          KnnVectorValues.DocIndexIterator it = values.iterator();
+          for (int doc = it.nextDoc();
+              doc != KnnVectorValues.DocIndexIterator.NO_MORE_DOCS;
+              doc = it.nextDoc()) {
+            String id = sf.document(doc).get("id");
+            assertNull("vector for " + id + " appeared in two outputs", found.put(id, null));
+            assertArrayEquals(
+                "vector changed for " + id, expected.get(id), values.vectorValue(it.index()), 0f);
+          }
+        }
+        assertEquals(expected.keySet(), found.keySet());
+
+        // And the rebuilt graphs are searchable: a query at a known vector finds its own document.
+        IndexSearcher searcher = new IndexSearcher(r);
+        float[] target = vectorFor(SEGMENTS - 1, PER_SEGMENT - 1);
+        TopDocs hits = searcher.search(new KnnFloatVectorQuery("vec", target, 1), 1);
+        assertEquals(1, hits.scoreDocs.length);
+        assertEquals(
+            id(SEGMENTS - 1, PER_SEGMENT - 1),
+            searcher.storedFields().document(hits.scoreDocs[0].doc).get("id"));
+      }
+    }
+  }
 
   private class PartitioningMergePolicy extends MergePolicy {
     @Override

@@ -20,7 +20,6 @@ import java.io.IOException;
 import java.util.ServiceLoader;
 import java.util.Set;
 import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat; // javadocs
-import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.util.NamedSPILoader;
@@ -92,31 +91,6 @@ public abstract class PostingsFormat implements NamedSPILoader.NamedSPI {
 
   /** Writes a new segment */
   public abstract FieldsConsumer fieldsConsumer(SegmentWriteState state) throws IOException;
-
-  /**
-   * Whether consumers from this format support {@link FieldsConsumer#pushWriter}, i.e. can be fed
-   * one term at a time so that a single walk of a source feeds several outputs.
-   *
-   * <p>This is asked of the <i>format</i> rather than of a consumer so that a dispatching format
-   * can answer for its delegates without instantiating them -- instantiating a consumer creates
-   * files.
-   *
-   * @lucene.experimental
-   */
-  public boolean supportsPushWriter() {
-    return false;
-  }
-
-  /**
-   * The same question, restricted to the fields a segment actually holds. A format that dispatches
-   * per field can only answer for the fields it will be asked about, so callers that hold the
-   * segment's {@link FieldInfos} should ask this way.
-   *
-   * @lucene.experimental
-   */
-  public boolean supportsPushWriter(FieldInfos fieldInfos) {
-    return supportsPushWriter();
-  }
 
   /**
    * Reads a segment. NOTE: by the time this call returns, it must hold open any files it will need

@@ -16,9 +16,11 @@
  */
 package org.apache.lucene.index;
 
-import java.io.Closeable;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import org.apache.lucene.codecs.Codec;
@@ -33,7 +35,6 @@ import org.apache.lucene.codecs.StoredFieldsWriter;
 import org.apache.lucene.codecs.TermVectorsWriter;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
-import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.Version;
 
@@ -54,7 +55,7 @@ final class SegmentMerger {
   private final FieldInfos.Builder fieldInfosBuilder;
   final Thread mergeStateCreationThread;
 
-  // Set by mergeExceptPostings(), and read by the phases after it.
+  // Set once the stored fields are merged, and read by the phases after that.
   private SegmentWriteState segmentWriteState;
   private SegmentReadState segmentReadState;
   private int numMerged;
@@ -121,24 +122,6 @@ final class SegmentMerger {
    * @throws IOException if there is a low-level IO error
    */
   MergeState merge() throws IOException {
-    mergeExceptPostings();
-    mergePostings();
-    return writeFieldInfos();
-  }
-
-  /**
-   * Everything except the postings and the field infos.
-   *
-   * <p>A merge producing several outputs writes the postings of all of them from one walk of the
-   * inputs, so it needs to stop each output here, write the postings, and then finish. Only two
-   * things fix where that seam can go. Norms come first because a postings writer reads them back
-   * to derive impacts, in the output's own document ids. Field infos come last because a per-field
-   * format records which format wrote each field as a {@link FieldInfo} attribute while writing it,
-   * and those attributes have to exist before they are persisted -- so everything that stamps one
-   * belongs on this side of the seam, which is why doc values, points and vectors are here rather
-   * than after the postings, where the order of the files themselves does not matter.
-   */
-  void mergeExceptPostings() throws IOException {
     if (!shouldMerge()) {
       throw new IllegalStateException("Merge would result in 0 document segment");
     }
@@ -192,67 +175,12 @@ final class SegmentMerger {
     if (mergeState.mergeFieldInfos.hasTermVectors()) {
       mergeWithLogging(this::mergeTermVectors, "term vectors");
     }
-  }
 
-  /** Writes this segment's postings, reading its inputs itself. */
-  void mergePostings() throws IOException {
     mergeWithLogging(this::mergeTerms, segmentWriteState, segmentReadState, "postings", numMerged);
-  }
 
-  boolean hasPostings() {
-    // Like supportsPushWriter(), answerable before the merge has written anything.
-    mergeFieldInfos();
-    return mergeState.mergeFieldInfos.hasPostings();
-  }
-
-  /** Whether this segment's postings can be written by a caller driving the pass instead. */
-  boolean supportsPushWriter() {
-    // Answerable before anything is written, so a caller can still refuse cleanly.
-    mergeFieldInfos();
-    return codec.postingsFormat().supportsPushWriter(mergeState.mergeFieldInfos);
-  }
-
-  /**
-   * Opens what a postings pass writes through, for a caller that drives the pass itself rather than
-   * calling {@link #mergePostings()} -- several outputs fed from one walk of the inputs.
-   */
-  PostingsPass openPostingsPass() throws IOException {
-    NormsProducer norms = null;
-    try {
-      if (mergeState.mergeFieldInfos.hasNorms()) {
-        norms = codec.normsFormat().normsProducer(segmentReadState);
-      }
-      FieldsConsumer consumer = codec.postingsFormat().fieldsConsumer(segmentWriteState);
-      return new PostingsPass(consumer, norms);
-    } catch (Throwable t) {
-      IOUtils.closeWhileHandlingException(norms);
-      throw t;
-    }
-  }
-
-  /** The write side of one output's postings, held open across a shared pass. */
-  static final class PostingsPass implements Closeable {
-    final FieldsConsumer consumer;
-
-    /**
-     * The segment's own norms, read back from what {@link #mergeExceptPostings()} wrote: the
-     * postings writer derives impacts from them, and looks them up by this segment's document ids.
-     */
-    final NormsProducer norms;
-
-    private final NormsProducer normsToClose;
-
-    private PostingsPass(FieldsConsumer consumer, NormsProducer norms) {
-      this.consumer = consumer;
-      this.normsToClose = norms;
-      // Reuses one IndexInput for all terms, as the per-output path does.
-      this.norms = norms == null ? null : norms.getMergeInstance();
-    }
-
-    @Override
-    public void close() throws IOException {
-      IOUtils.close(consumer, normsToClose);
-    }
+    // Field infos last: a per-field format records which format wrote a field as a FieldInfo
+    // attribute while writing it, so every format that stamps one must have run by now.
+    return writeFieldInfos();
   }
 
   /** Persists the field infos, which every other phase may still have been adding to. */
@@ -315,9 +243,8 @@ final class SegmentMerger {
 
   /**
    * Works out which fields the merged segment will have. This writes nothing, so a caller may run
-   * it while still free to refuse the merge -- which is what makes {@link #supportsPushWriter()}
-   * answerable before any file exists. Running it twice would add every field to the builder again,
-   * hence the guard.
+   * it while still free to refuse the merge, before any file exists. Running it twice would add
+   * every field to the builder again, hence the guard.
    */
   void mergeFieldInfos() {
     if (mergeState.mergeFieldInfos != null) {
@@ -423,8 +350,21 @@ final class SegmentMerger {
   }
 
   void cleanupMerge() throws IOException {
+    cleanupMerge(Collections.newSetFromMap(new IdentityHashMap<>()));
+  }
+
+  /**
+   * Finishes each merge instance exactly once, skipping any the caller has already finished.
+   *
+   * <p>A partitioned merge builds one merger per output over the same input readers, and {@link
+   * KnnVectorsReader#getMergeInstance()} may return {@code this} -- {@code
+   * Lucene99FlatVectorsReader} does, having only flipped the read advice on an input it keeps.
+   * Finishing once per output would then touch that input again after the first call reverted it,
+   * so the outputs share the set of readers they have finished.
+   */
+  void cleanupMerge(Set<KnnVectorsReader> finished) throws IOException {
     for (KnnVectorsReader reader : mergeState.knnVectorsReaders) {
-      if (reader != null) {
+      if (reader != null && finished.add(reader)) {
         reader.finishMerge();
       }
     }

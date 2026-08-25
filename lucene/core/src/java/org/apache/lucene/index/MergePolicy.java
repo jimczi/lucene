@@ -369,17 +369,18 @@ public abstract class MergePolicy {
      * starting at {@code 0} and ending at that input's {@code maxDoc}: output {@code o} takes docs
      * {@code [b[o], b[o+1])} from that input.
      *
-     * <p><b>Cost:</b> close to an ordinary merge, and in particular not proportional to the output
-     * count. Bytes written are unaffected -- every document is written exactly once, into whichever
-     * output owns it -- and reads are held near that because the three things that would otherwise
-     * repeat per output do not: the inputs are verified once for the whole merge, doc values seek
-     * to the range an output owns, and the postings of every output are written from a single walk
-     * of the inputs (see {@link org.apache.lucene.codecs.TermsPushWriter}).
+     * <p><b>Cost:</b> bytes written are unaffected -- every document is written exactly once, into
+     * whichever output owns it. Reads depend on whether a format can skip by document range. The
+     * inputs are verified once for the whole merge rather than once per output, and doc values seek
+     * to the range an output owns, so those cost about what an ordinary merge costs.
      *
-     * <p>What is left is per-format. Stored fields are chunked, so each output re-reads the chunks
-     * straddling its boundaries -- negligible until an output's share of one input approaches a
-     * chunk. Points are the exception: a block k-d tree is ordered by value, so no leaf can be
-     * skipped by document range and each output reads the whole tree.
+     * <p>Two formats cannot skip, and each output reads them in full: a term's postings are spread
+     * across every output, so masking documents saves nothing and every output reads the terms
+     * dictionary of every input; and a block k-d tree is ordered by value, so no leaf can be
+     * skipped by document range. Both are linear in the output count and confined to those formats,
+     * which in an index whose bulk is stored fields is a small share of the merge. Stored fields
+     * themselves are chunked, so an output re-reads only the chunks straddling its boundaries --
+     * negligible until its share of one input approaches a chunk.
      *
      * <p>Expressing the split as boundaries rather than arbitrary doc sets makes the two properties
      * {@link IndexWriter} depends on structural rather than a caller obligation: the outputs are

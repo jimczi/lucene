@@ -20,7 +20,6 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.Fields;
 import org.apache.lucene.index.MappedMultiFields;
 import org.apache.lucene.index.MergeState;
@@ -63,29 +62,6 @@ public abstract class FieldsConsumer implements Closeable {
    * </ul>
    */
   public abstract void write(Fields fields, NormsProducer norms) throws IOException;
-
-  /**
-   * Returns a writer that accepts one field's terms one at a time, or {@code null} if this format
-   * can only be written through {@link #write(Fields,NormsProducer)}.
-   *
-   * <p>This exists so several consumers can be fed from a <i>single</i> walk of one source, which
-   * {@code write} cannot do because there it is the consumer that drives the walk. A merge
-   * partitioning its input into <i>n</i> outputs otherwise reads every posting <i>n</i> times. See
-   * {@link TermsPushWriter}.
-   *
-   * <p>Fields must still be written in increasing order, and the returned writer must be closed
-   * before the next field is started.
-   *
-   * <p>A caller that cannot fall back to {@code write} -- a merge feeding several outputs cannot,
-   * since discovering the answer part-way through would leave partially written segments behind --
-   * must ask {@link PostingsFormat#supportsPushWriter(org.apache.lucene.index.FieldInfos)} before
-   * creating any consumer, because creating one already creates files.
-   *
-   * @lucene.experimental
-   */
-  public TermsPushWriter pushWriter(FieldInfo fieldInfo) throws IOException {
-    return null;
-  }
 
   /**
    * Merges in the fields from the readers in <code>mergeState</code>. The default implementation
