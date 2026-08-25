@@ -17,6 +17,8 @@
 package org.apache.lucene.index;
 
 import org.apache.lucene.codecs.DocValuesProducer;
+import org.apache.lucene.codecs.KnnVectorsReader;
+import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.FixedBitSet;
 
@@ -83,6 +85,26 @@ final class DocRangeCodecReader extends FilterCodecReader {
       return null;
     }
     return new DocRangeDocValuesProducer(values, start, end);
+  }
+
+  /** Norms restricted to the range, for the same reason as the doc values above. */
+  @Override
+  public NormsProducer getNormsReader() {
+    final NormsProducer norms = in.getNormsReader();
+    if (norms == null) {
+      return null;
+    }
+    return new DocRangeNormsProducer(norms, start, end);
+  }
+
+  /** Vector values restricted to the range, for the same reason as the doc values above. */
+  @Override
+  public KnnVectorsReader getVectorReader() {
+    final KnnVectorsReader vectors = in.getVectorReader();
+    if (vectors == null) {
+      return null;
+    }
+    return new DocRangeKnnVectorsReader(vectors, start, end);
   }
 
   @Override
