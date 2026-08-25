@@ -26,20 +26,30 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.FieldType;
+import org.apache.lucene.document.IntPoint;
+import org.apache.lucene.document.KnnByteVectorField;
 import org.apache.lucene.document.KnnFloatVectorField;
+import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
+import org.apache.lucene.document.SortedNumericDocValuesField;
+import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
+import org.apache.lucene.document.TextField;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.KnnFloatVectorQuery;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.tests.analysis.MockAnalyzer;
 import org.apache.lucene.tests.store.MockDirectoryWrapper;
 import org.apache.lucene.tests.util.LuceneTestCase;
 import org.apache.lucene.tests.util.TestUtil;
@@ -67,7 +77,7 @@ public class TestMultiOutputMerge extends LuceneTestCase {
   }
 
   private IndexWriterConfig config() {
-    IndexWriterConfig iwc = newIndexWriterConfig(null);
+    IndexWriterConfig iwc = newIndexWriterConfig(new MockAnalyzer(random()));
     // A contiguous doc range is a contiguous key range only when sorted.
     iwc.setIndexSort(new Sort(new SortField("sort", SortField.Type.STRING)));
     iwc.setMergePolicy(new PartitioningMergePolicy());
@@ -92,6 +102,58 @@ public class TestMultiOutputMerge extends LuceneTestCase {
 
   private static float[] vectorFor(int seg, int d) {
     return new float[] {seg, d, (float) (seg * PER_SEGMENT + d)};
+  }
+
+  /**
+   * Every value here is derived from {@code ord}, so any value that ends up on the wrong document
+   * after a partitioned merge is a mismatch rather than merely a plausible-looking number.
+   */
+  private static Document everyTypeDoc(String id, int ord) {
+    Document d = new Document();
+    d.add(new StringField("id", id, Field.Store.NO));
+    d.add(new StoredField("id", id));
+    d.add(new SortedDocValuesField("sort", new BytesRef(id)));
+
+    // postings with positions, offsets and norms, plus term vectors
+    FieldType text = new FieldType(TextField.TYPE_NOT_STORED);
+    text.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS);
+    text.setStoreTermVectors(true);
+    text.setStoreTermVectorPositions(true);
+    text.setStoreTermVectorOffsets(true);
+    text.freeze();
+    d.add(new Field("text", textFor(ord), text));
+
+    d.add(new NumericDocValuesField("num", ord));
+    d.add(new BinaryDocValuesField("bin", new BytesRef(binFor(ord))));
+    d.add(new SortedSetDocValuesField("sset", new BytesRef(binFor(ord))));
+    d.add(new SortedSetDocValuesField("sset", new BytesRef("shared")));
+    d.add(new SortedNumericDocValuesField("snum", ord));
+    d.add(new SortedNumericDocValuesField("snum", ord + 1L));
+    // a doc-values field carrying a skip index, which the range-restricting producer passes through
+    d.add(NumericDocValuesField.indexedField("skip", ord));
+
+    d.add(new IntPoint("point", ord));
+    d.add(new LongPoint("point2d", ord, -ord));
+
+    d.add(new KnnFloatVectorField("vec", floatVecFor(ord), VectorSimilarityFunction.EUCLIDEAN));
+    d.add(new KnnByteVectorField("bvec", byteVecFor(ord), VectorSimilarityFunction.EUCLIDEAN));
+    return d;
+  }
+
+  private static String textFor(int ord) {
+    return "shared term ord" + ord;
+  }
+
+  private static String binFor(int ord) {
+    return String.format(java.util.Locale.ROOT, "bin-%06d", ord);
+  }
+
+  private static float[] floatVecFor(int ord) {
+    return new float[] {ord, -ord, ord * 0.5f};
+  }
+
+  private static byte[] byteVecFor(int ord) {
+    return new byte[] {(byte) ord, (byte) -ord, (byte) (ord / 2)};
   }
 
   private static String id(int seg, int d) {
@@ -600,6 +662,135 @@ public class TestMultiOutputMerge extends LuceneTestCase {
         assertEquals(
             id(SEGMENTS - 1, PER_SEGMENT - 1),
             searcher.storedFields().document(hits.scoreDocs[0].doc).get("id"));
+      }
+    }
+  }
+
+  /**
+   * Every field type survives a partitioned merge, still attached to the document it came from.
+   *
+   * <p>Only doc values and the postings know about the split at all -- doc values seek to the
+   * output's range, postings are read per output -- so for every other format this asserts that
+   * being handed a reader that presents the rest of the segment as deleted is enough. Values are
+   * derived from the document's ordinal, so a value landing on the wrong document fails here rather
+   * than looking plausible.
+   */
+  public void testEveryFieldTypeSurvivesPartitionedMerge() throws Exception {
+    try (Directory dir = newDirectory()) {
+      Map<String, Integer> expected = new HashMap<>();
+      try (IndexWriter w = new IndexWriter(dir, config())) {
+        for (int seg = 0; seg < SEGMENTS; seg++) {
+          for (int d = 0; d < PER_SEGMENT; d++) {
+            int ord = seg * PER_SEGMENT + d;
+            w.addDocument(everyTypeDoc(id(seg, d), ord));
+            expected.put(id(seg, d), ord);
+          }
+          w.flush();
+        }
+        w.commit();
+        enabled = true;
+        proceed.countDown();
+        w.maybeMerge();
+      }
+
+      TestUtil.checkIndex(dir);
+
+      try (DirectoryReader r = DirectoryReader.open(dir)) {
+        assertTrue("expected several outputs, got " + r.leaves().size(), r.leaves().size() > 1);
+        Set<String> seen = new HashSet<>();
+
+        for (LeafReaderContext ctx : r.leaves()) {
+          LeafReader leaf = ctx.reader();
+          StoredFields stored = leaf.storedFields();
+          TermVectors termVectors = leaf.termVectors();
+
+          NumericDocValues num = leaf.getNumericDocValues("num");
+          BinaryDocValues bin = leaf.getBinaryDocValues("bin");
+          SortedSetDocValues sset = leaf.getSortedSetDocValues("sset");
+          SortedNumericDocValues snum = leaf.getSortedNumericDocValues("snum");
+          NumericDocValues skip = leaf.getNumericDocValues("skip");
+          NumericDocValues norms = leaf.getNormValues("text");
+          FloatVectorValues vecs = leaf.getFloatVectorValues("vec");
+          ByteVectorValues bvecs = leaf.getByteVectorValues("bvec");
+
+          assertNotNull("lost doc values", num);
+          assertNotNull("lost the skip-indexed field", skip);
+          assertNotNull("lost norms", norms);
+          assertNotNull("lost float vectors", vecs);
+          assertNotNull("lost byte vectors", bvecs);
+          assertNotNull("lost the doc-values skipper", leaf.getDocValuesSkipper("skip"));
+
+          KnnVectorValues.DocIndexIterator vecIt = vecs.iterator();
+          KnnVectorValues.DocIndexIterator bvecIt = bvecs.iterator();
+
+          for (int doc = 0; doc < leaf.maxDoc(); doc++) {
+            String id = stored.document(doc).get("id");
+            assertNotNull("document with no stored id", id);
+            Integer ord = expected.get(id);
+            assertNotNull("unknown document " + id, ord);
+            assertTrue("document " + id + " appeared in two outputs", seen.add(id));
+
+            assertTrue(num.advanceExact(doc));
+            assertEquals("num", ord.intValue(), num.longValue());
+
+            assertTrue(bin.advanceExact(doc));
+            assertEquals("bin", new BytesRef(binFor(ord)), bin.binaryValue());
+
+            assertTrue(sset.advanceExact(doc));
+            assertEquals("sset count", 2, sset.docValueCount());
+            Set<String> setValues = new HashSet<>();
+            for (int i = 0; i < 2; i++) {
+              setValues.add(sset.lookupOrd(sset.nextOrd()).utf8ToString());
+            }
+            assertEquals("sset", Set.of(binFor(ord), "shared"), setValues);
+
+            assertTrue(snum.advanceExact(doc));
+            assertEquals("snum count", 2, snum.docValueCount());
+            assertEquals("snum[0]", ord.intValue(), snum.nextValue());
+            assertEquals("snum[1]", ord + 1L, snum.nextValue());
+
+            assertTrue(skip.advanceExact(doc));
+            assertEquals("skip", ord.intValue(), skip.longValue());
+
+            assertTrue(norms.advanceExact(doc));
+            assertTrue("norm should be non-zero", norms.longValue() > 0);
+
+            Terms tv = termVectors.get(doc, "text");
+            assertNotNull("lost term vectors for " + id, tv);
+            TermsEnum tvTerms = tv.iterator();
+            assertTrue(
+                "term vector missing its unique term",
+                tvTerms.seekExact(new BytesRef("ord" + ord)));
+
+            assertEquals("float vector doc", doc, vecIt.advance(doc));
+            assertArrayEquals(
+                "float vector", floatVecFor(ord), vecs.vectorValue(vecIt.index()), 0f);
+            assertEquals("byte vector doc", doc, bvecIt.advance(doc));
+            assertArrayEquals("byte vector", byteVecFor(ord), bvecs.vectorValue(bvecIt.index()));
+          }
+        }
+        assertEquals("some documents were lost", expected.keySet(), seen);
+
+        // The indexed structures still answer queries, across whichever output owns each document.
+        IndexSearcher searcher = new IndexSearcher(r);
+        for (int ord : new int[] {0, 1, expected.size() / 2, expected.size() - 1}) {
+          assertEquals(
+              "postings for ord" + ord,
+              1,
+              searcher.count(new TermQuery(new Term("text", "ord" + ord))));
+          assertEquals(
+              "1d point for ord" + ord, 1, searcher.count(IntPoint.newExactQuery("point", ord)));
+          assertEquals(
+              "2d point for ord" + ord,
+              1,
+              searcher.count(
+                  LongPoint.newRangeQuery(
+                      "point2d", new long[] {ord, -ord}, new long[] {ord, -ord})));
+        }
+        assertEquals(
+            "shared term should match every document",
+            expected.size(),
+            searcher.count(new TermQuery(new Term("text", "shared"))));
       }
     }
   }
