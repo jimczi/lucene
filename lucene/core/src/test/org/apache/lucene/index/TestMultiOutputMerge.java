@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
@@ -64,6 +65,7 @@ public class TestMultiOutputMerge extends LuceneTestCase {
   private static final int PER_SEGMENT = 120;
   private static final String SOFT = "soft_deleted";
 
+  private Analyzer analyzer;
   private CountDownLatch mergeStarted;
   private CountDownLatch proceed;
   private volatile boolean enabled;
@@ -71,13 +73,14 @@ public class TestMultiOutputMerge extends LuceneTestCase {
   @Override
   public void setUp() throws Exception {
     super.setUp();
+    analyzer = new MockAnalyzer(random());
     mergeStarted = new CountDownLatch(1);
     proceed = new CountDownLatch(1);
     enabled = false;
   }
 
   private IndexWriterConfig config() {
-    IndexWriterConfig iwc = newIndexWriterConfig(new MockAnalyzer(random()));
+    IndexWriterConfig iwc = newIndexWriterConfig(analyzer);
     // A contiguous doc range is a contiguous key range only when sorted.
     iwc.setIndexSort(new Sort(new SortField("sort", SortField.Type.STRING)));
     iwc.setMergePolicy(new PartitioningMergePolicy());
@@ -138,6 +141,12 @@ public class TestMultiOutputMerge extends LuceneTestCase {
     d.add(new KnnFloatVectorField("vec", floatVecFor(ord), VectorSimilarityFunction.EUCLIDEAN));
     d.add(new KnnByteVectorField("bvec", byteVecFor(ord), VectorSimilarityFunction.EUCLIDEAN));
     return d;
+  }
+
+  /** The ordinal an id was generated from, so a reference document can be rebuilt from it. */
+  private static int ordOf(String id) {
+    String[] parts = id.split("-");
+    return Integer.parseInt(parts[1]) * PER_SEGMENT + Integer.parseInt(parts[2]);
   }
 
   private static String textFor(int ord) {
@@ -793,6 +802,174 @@ public class TestMultiOutputMerge extends LuceneTestCase {
             searcher.count(new TermQuery(new Term("text", "shared"))));
       }
     }
+  }
+
+  /**
+   * Each output is structurally identical to a segment built by indexing its documents directly.
+   *
+   * <p>The strongest statement available: rather than checking the values this test happens to
+   * think of, it duels every output against a reference segment holding the same documents in the
+   * same order, comparing terms, postings, norms, stored fields, term vectors, doc values, points
+   * and vectors. A partitioned merge is supposed to be indistinguishable from having indexed each
+   * output's share on its own, and this is that sentence as an assertion.
+   */
+  public void testOutputsMatchDirectlyIndexedSegments() throws Exception {
+    try (Directory dir = newDirectory()) {
+      try (IndexWriter w = new IndexWriter(dir, config())) {
+        for (int seg = 0; seg < SEGMENTS; seg++) {
+          for (int d = 0; d < PER_SEGMENT; d++) {
+            w.addDocument(everyTypeDoc(id(seg, d), seg * PER_SEGMENT + d));
+          }
+          w.flush();
+        }
+        w.commit();
+        enabled = true;
+        proceed.countDown();
+        w.maybeMerge();
+      }
+
+      try (DirectoryReader r = DirectoryReader.open(dir)) {
+        assertTrue("expected several outputs, got " + r.leaves().size(), r.leaves().size() > 1);
+        for (LeafReaderContext ctx : r.leaves()) {
+          LeafReader output = ctx.reader();
+
+          // Rebuild exactly this output's documents, in the order it holds them.
+          StoredFields stored = output.storedFields();
+          List<String> ids = new ArrayList<>();
+          for (int doc = 0; doc < output.maxDoc(); doc++) {
+            ids.add(stored.document(doc).get("id"));
+          }
+
+          try (Directory reference = newDirectory()) {
+            IndexWriterConfig iwc = newIndexWriterConfig(analyzer);
+            iwc.setIndexSort(new Sort(new SortField("sort", SortField.Type.STRING)));
+            try (IndexWriter rw = new IndexWriter(reference, iwc)) {
+              for (String id : ids) {
+                rw.addDocument(everyTypeDoc(id, ordOf(id)));
+              }
+              rw.forceMerge(1);
+            }
+            try (DirectoryReader refReader = DirectoryReader.open(reference)) {
+              assertEquals("reference should be one segment", 1, refReader.leaves().size());
+              assertReaderEquals(
+                  "output of a partitioned merge vs directly indexed", refReader, output);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /** A boundary landing inside a document block is refused rather than silently splitting it. */
+  public void testRefusesToSplitDocumentBlocks() throws Exception {
+    try (Directory dir = newDirectory()) {
+      IndexWriterConfig iwc = blockConfig();
+      // Serial, so the validation failure surfaces on this thread.
+      iwc.setMergeScheduler(new SerialMergeScheduler());
+      Throwable caught = null;
+      try (IndexWriter w = new IndexWriter(dir, iwc)) {
+        // 3 does not divide the cut points the policy chooses, so a boundary lands inside a block.
+        indexBlocks(w, 3);
+        enabled = true;
+        proceed.countDown();
+        try {
+          w.maybeMerge();
+        } catch (Throwable t) {
+          caught = t;
+        }
+        w.rollback();
+      } catch (Throwable t) {
+        if (caught == null) {
+          caught = t;
+        }
+      }
+      assertNotNull("splitting a document block must be refused", caught);
+      boolean sawIae = false;
+      for (Throwable t = caught; t != null; t = t.getCause()) {
+        if (t instanceof IllegalArgumentException
+            && t.getMessage().contains("cuts inside a document block")) {
+          sawIae = true;
+          break;
+        }
+      }
+      assertTrue("expected a block-splitting rejection, got " + caught, sawIae);
+    }
+  }
+
+  /**
+   * Blocks survive a partitioned merge when the boundaries respect them.
+   *
+   * <p>Nested documents are not excluded by the primitive; what it requires is that a cut falls
+   * between blocks. Here the block size divides the cut points, which is the same condition a
+   * policy would arrange for by aligning its boundaries to parent documents.
+   */
+  public void testBlocksSurviveBoundariesThatRespectThem() throws Exception {
+    final int blockSize = 4; // divides the policy's cut points (0, 40, 80, 120)
+    try (Directory dir = newDirectory()) {
+      try (IndexWriter w = new IndexWriter(dir, blockConfig())) {
+        indexBlocks(w, blockSize);
+        enabled = true;
+        proceed.countDown();
+        w.maybeMerge();
+      }
+
+      TestUtil.checkIndex(dir);
+
+      try (DirectoryReader r = DirectoryReader.open(dir)) {
+        assertTrue("expected several outputs, got " + r.leaves().size(), r.leaves().size() > 1);
+        for (LeafReaderContext ctx : r.leaves()) {
+          LeafReader leaf = ctx.reader();
+          StoredFields stored = leaf.storedFields();
+          Map<String, Integer> perOutput = new HashMap<>();
+          for (int doc = 0; doc < leaf.maxDoc(); doc++) {
+            perOutput.merge(stored.document(doc).get("parent"), 1, Integer::sum);
+          }
+          for (Map.Entry<String, Integer> e : perOutput.entrySet()) {
+            assertEquals(
+                "block " + e.getKey() + " was split across outputs",
+                blockSize,
+                e.getValue().intValue());
+          }
+          // The parent of each block is still its last document, which is what block-join needs.
+          NumericDocValues parents = leaf.getNumericDocValues("_parent");
+          assertNotNull("lost the parent field", parents);
+          for (int doc = blockSize - 1; doc < leaf.maxDoc(); doc += blockSize) {
+            assertTrue("document " + doc + " should be a parent", parents.advanceExact(doc));
+          }
+        }
+      }
+    }
+  }
+
+  private void indexBlocks(IndexWriter w, int blockSize) throws IOException {
+    for (int seg = 0; seg < SEGMENTS; seg++) {
+      for (int b = 0; b < PER_SEGMENT / blockSize; b++) {
+        List<Document> block = new ArrayList<>();
+        String parentId = id(seg, b);
+        for (int c = 0; c < blockSize - 1; c++) {
+          Document child = new Document();
+          child.add(new StringField("kind", "child", Field.Store.NO));
+          child.add(new StoredField("parent", parentId));
+          block.add(child);
+        }
+        Document parent = new Document();
+        parent.add(new StringField("kind", "parent", Field.Store.NO));
+        parent.add(new StoredField("parent", parentId));
+        parent.add(new SortedDocValuesField("sort", new BytesRef(parentId)));
+        block.add(parent);
+        w.addDocuments(block);
+      }
+      w.flush();
+    }
+    w.commit();
+  }
+
+  private IndexWriterConfig blockConfig() {
+    IndexWriterConfig iwc = newIndexWriterConfig(analyzer);
+    iwc.setIndexSort(new Sort(new SortField("sort", SortField.Type.STRING)));
+    iwc.setParentField("_parent");
+    iwc.setMergePolicy(new PartitioningMergePolicy());
+    return iwc;
   }
 
   private class PartitioningMergePolicy extends MergePolicy {

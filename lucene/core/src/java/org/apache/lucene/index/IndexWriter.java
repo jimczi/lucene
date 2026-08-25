@@ -5415,7 +5415,9 @@ public class IndexWriter
    * rather than in a single run, and splitting a term's postings by document id would quietly hand
    * documents to the wrong output.
    */
-  private void validateDocRangePartitions(MergePolicy.OneMerge merge, int[][] partitions) {
+  private void validateDocRangePartitions(
+      MergePolicy.OneMerge merge, int[][] partitions, List<CodecReader> readers)
+      throws IOException {
     if (config.getIndexSort() == null) {
       throw new IllegalArgumentException(
           "a partitioned merge requires an index sort: a contiguous doc range is a contiguous key "
@@ -5457,6 +5459,57 @@ public class IndexWriter
           throw new IllegalArgumentException(
               "docRangePartitions[" + i + "] is not non-decreasing at " + o);
         }
+      }
+      checkBoundariesRespectBlocks(readers.get(i), b, i);
+    }
+  }
+
+  /**
+   * Refuses a boundary that falls inside a document block.
+   *
+   * <p>A block is a run of documents ending at its parent, and queries over it find the children by
+   * counting back from the parent. An index sort keeps a block contiguous, but says nothing about
+   * where a partition may cut, so a boundary landing between a child and its parent would put them
+   * in different segments and leave both halves quietly wrong.
+   *
+   * <p>Carrying the same partitioning value on the children is not sufficient on its own: the
+   * boundary is a document offset, and whether the offset a caller derives from that value lands
+   * before the children or between them and their parent depends on whether the children carry the
+   * value at all. So the invariant is enforced here, on the offsets themselves. A policy that wants
+   * to partition a block index has the readers when it chooses its boundaries, and can align them
+   * by reading the same parent field this does.
+   */
+  private static void checkBoundariesRespectBlocks(CodecReader reader, int[] b, int input)
+      throws IOException {
+    final String parentField = reader.getFieldInfos().getParentField();
+    if (parentField == null) {
+      return;
+    }
+    final NumericDocValues parents = reader.getNumericDocValues(parentField);
+    if (parents == null) {
+      return;
+    }
+    final int maxDoc = reader.maxDoc();
+    int previous = -1;
+    for (int o = 1; o < b.length - 1; o++) {
+      final int boundary = b[o];
+      // The ends of the space are block boundaries by construction, and a repeated boundary is an
+      // empty output, which cannot split anything the previous one did not.
+      if (boundary == 0 || boundary == maxDoc || boundary == previous) {
+        continue;
+      }
+      previous = boundary;
+      // A boundary is legal exactly when the document before it ends a block.
+      if (parents.advanceExact(boundary - 1) == false) {
+        throw new IllegalArgumentException(
+            "docRangePartitions["
+                + input
+                + "] cuts inside a document block at "
+                + boundary
+                + ": document "
+                + (boundary - 1)
+                + " is not the last of its block, and a partitioned merge must not separate a "
+                + "block's documents from their parent");
       }
     }
   }
@@ -5500,7 +5553,7 @@ public class IndexWriter
             "OneMerge.isPartitioned() returned true but getDocRangePartitions() returned null");
       }
       merge.outputCount = partitions[0].length - 1;
-      validateDocRangePartitions(merge, partitions);
+      validateDocRangePartitions(merge, partitions, rawReaders);
       final int outputCount = merge.getOutputCount();
 
       if (infoStream.isEnabled("IW")) {
