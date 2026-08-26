@@ -63,15 +63,25 @@ public class PartitionedMergeCost {
     static final int DOCS = Integer.getInteger("docs", 5000);
     static final int DIMS = Integer.getInteger("dims", 64);
     static final String OUTPUTS = System.getProperty("outputs", "2,4,8,16,64");
+    /**
+     * hnsw or none.
+     *
+     * <p>Worth knowing what the vector row measures. A merge rebuilds the HNSW graph, which is many
+     * random distance computations over the vectors rather than a sequential pass, so the bytes
+     * read say what rebuilding costs, not what reading the output's range costs. That is the real
+     * cost of merging vectors either way; it just is not comparable to the other rows, which are
+     * dominated by sequential reads. Run with none to see the other formats without it.
+     */
+    static final String VECTORS = System.getProperty("vectors", "hnsw");
 
     /** Extensions grouped the way a reader thinks about them, rather than by file. */
     static final Map<String, String> FORMATS = new LinkedHashMap<>();
     static {
         FORMATS.put("stored fields", "fdt fdx fdm");
-        FORMATS.put("terms dict", "tim tip tmd");
-        FORMATS.put("postings", "doc pos pay");
+        FORMATS.put("terms dict", "tim tip tmd tmp");
+        FORMATS.put("postings", "doc pos pay psm");
         FORMATS.put("norms", "nvd nvm");
-        FORMATS.put("doc values", "dvd dvm");
+        FORMATS.put("doc values", "dvd dvm dvs");
         FORMATS.put("points", "kdd kdi kdm");
         FORMATS.put("vectors", "vec vex vem veq vemf vemq");
         FORMATS.put("term vectors", "tvd tvx tvm");
@@ -88,8 +98,8 @@ public class PartitionedMergeCost {
 
         System.out.printf(
                 Locale.ROOT,
-                "inputs: %d segments x %d docs = %d docs, %d-dimensional vectors%n%n",
-                SEGMENTS, DOCS, SEGMENTS * DOCS, DIMS);
+                "inputs: %d segments x %d docs = %d docs, vectors=%s (%d dims)%n%n",
+                SEGMENTS, DOCS, SEGMENTS * DOCS, VECTORS, DIMS);
 
         // M=1 is an ordinary merge of the same inputs: the denominator for everything else.
         Map<String, long[]> baseline = mergeOnce(root, inputs, 1);
@@ -136,6 +146,11 @@ public class PartitionedMergeCost {
 
     static void report(Map<String, long[]> baseline, Map<Integer, Map<String, long[]>> runs) {
         table("BYTES READ, and the multiple of an ordinary merge", baseline, runs, 0);
+        if (VECTORS.equals("none") == false) {
+            System.out.println(
+                    "  (vectors: a merge rebuilds the HNSW graph, so that row is dominated by "
+                            + "random-access distance computations, not by sequential reads)");
+        }
         System.out.println();
         // Writes are the control: every document is written exactly once, into whichever output
         // owns it, so nothing here should move with the output count. A format that does is a
@@ -204,8 +219,15 @@ public class PartitionedMergeCost {
         return total;
     }
 
+    /** A unit that keeps small formats legible: a row reading 0.0 MB cannot be interpreted. */
     static String mb(long bytes) {
-        return String.format(Locale.ROOT, "%.1f MB", bytes / 1024.0 / 1024.0);
+        if (bytes >= 1024L * 1024L) {
+            return String.format(Locale.ROOT, "%.1f MB", bytes / 1024.0 / 1024.0);
+        }
+        if (bytes >= 1024L) {
+            return String.format(Locale.ROOT, "%.1f KB", bytes / 1024.0);
+        }
+        return bytes + " B";
     }
 
     static IndexWriterConfig config() {
@@ -254,11 +276,13 @@ public class PartitionedMergeCost {
         d.add(new SortedNumericDocValuesField("snum", ord));
         d.add(new IntPoint("point", ord));
         d.add(new LongPoint("point2d", ord, -ord));
-        float[] vector = new float[DIMS];
-        for (int i = 0; i < DIMS; i++) {
-            vector[i] = rnd.nextFloat();
+        if (VECTORS.equals("none") == false) {
+            float[] vector = new float[DIMS];
+            for (int i = 0; i < DIMS; i++) {
+                vector[i] = rnd.nextFloat();
+            }
+            d.add(new KnnFloatVectorField("vec", vector, VectorSimilarityFunction.DOT_PRODUCT));
         }
-        d.add(new KnnFloatVectorField("vec", vector, VectorSimilarityFunction.DOT_PRODUCT));
         return d;
     }
 
@@ -272,9 +296,15 @@ public class PartitionedMergeCost {
         return sb.append("\"}").toString();
     }
 
+    /**
+     * Deliberately varied in length. Norms encode a document's length, so a corpus of uniform
+     * documents compresses them to almost nothing and the norms row reports on a file too small to
+     * interpret -- which is exactly what a first run of this did.
+     */
     static String text(Random rnd) {
-        StringBuilder sb = new StringBuilder(200);
-        for (int i = 0; i < 30; i++) {
+        int terms = 5 + rnd.nextInt(120);
+        StringBuilder sb = new StringBuilder(terms * 9);
+        for (int i = 0; i < terms; i++) {
             sb.append(WORDS[rnd.nextInt(WORDS.length)]).append(' ');
         }
         return sb.toString();
