@@ -73,6 +73,14 @@ public class PartitionedMergeCost {
      * dominated by sequential reads. Run with none to see the other formats without it.
      */
     static final String VECTORS = System.getProperty("vectors", "hnsw");
+    /**
+     * all, or numeric to drop the fields whose doc values carry a value dictionary.
+     *
+     * <p>Sorted and sorted-set doc values store a dictionary of distinct values alongside the
+     * per-document ordinals. That dictionary is ordered by value, not by document, so it is the
+     * same shape of problem as a terms dictionary -- which is worth being able to isolate.
+     */
+    static final String DV = System.getProperty("dv", "all");
 
     /** Extensions grouped the way a reader thinks about them, rather than by file. */
     static final Map<String, String> FORMATS = new LinkedHashMap<>();
@@ -232,7 +240,11 @@ public class PartitionedMergeCost {
 
     static IndexWriterConfig config() {
         IndexWriterConfig iwc = new IndexWriterConfig(new StandardAnalyzer());
-        iwc.setIndexSort(new Sort(new SortField("sort", SortField.Type.STRING)));
+        iwc.setIndexSort(
+                new Sort(
+                        DV.equals("numeric")
+                                ? new SortField("sort", SortField.Type.LONG)
+                                : new SortField("sort", SortField.Type.STRING)));
         // Individual files, so each format reports separately rather than disappearing into a .cfs.
         iwc.setUseCompoundFile(false);
         return iwc;
@@ -267,12 +279,18 @@ public class PartitionedMergeCost {
         String id = String.format(Locale.ROOT, "id-%08d", ord);
         Document d = new Document();
         d.add(new StringField("id", id, Field.Store.NO));
-        d.add(new SortedDocValuesField("sort", new BytesRef(id)));
+        if (DV.equals("numeric")) {
+            d.add(new NumericDocValuesField("sort", ord));
+        } else {
+            d.add(new SortedDocValuesField("sort", new BytesRef(id)));
+        }
         d.add(new StoredField("_source", source(id, rnd)));
         d.add(new Field("text", text(rnd), TEXT));
         d.add(new NumericDocValuesField("num", ord));
-        d.add(new BinaryDocValuesField("bin", new BytesRef(id)));
-        d.add(new SortedSetDocValuesField("sset", new BytesRef(id)));
+        if (DV.equals("numeric") == false) {
+            d.add(new BinaryDocValuesField("bin", new BytesRef(id)));
+            d.add(new SortedSetDocValuesField("sset", new BytesRef(id)));
+        }
         d.add(new SortedNumericDocValuesField("snum", ord));
         d.add(new IntPoint("point", ord));
         d.add(new LongPoint("point2d", ord, -ord));
